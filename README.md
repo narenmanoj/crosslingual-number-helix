@@ -13,30 +13,30 @@ specific hypothesis, and how the code tests it.
 > Fourier "helix"; that helix subspace is **shared** across scripts, notations, and languages —
 > but only *partially*, and the degree of sharing degrades as the surface transformation grows.
 
-Evidence, on Qwen2.5-7B (base) and replicated representationally on Aya-23-8B:
+Thesis: **partial geometric universality, heterogeneous computational use.** Evidence:
 
-- **Graded sharing (H2):** cross-form alignment falls `script ≈ notation > language`, every form far
-  above a random floor — robust across **three** model families (Qwen2.5-7B, Mistral-Nemo-Base,
-  Aya-23-8B) and three activation readouts. The magnitude varies by family; the *ordering* doesn't.
-- **Localized, family-specifically:** sharing peaks in a layer band then collapses; the band is
-  mid-network in Qwen, mid-late in Mistral-Nemo, late in Aya (the ordering, not the location,
-  is universal).
-- **Causally sufficient everywhere:** patching the shared subspace with a value steers arithmetic
-  for *every* form (Spanish/French/German words, Devanagari/Arabic-Indic digits), while a random
-  subspace does nothing — the illusion control passes (Qwen2.5-7B, Mistral-Nemo-Base).
-- **Causally necessary too (layer-dependent):** ablating the shared subspace *drops* arithmetic
-  accuracy in both base models, at some layers more than others — the vulnerability is concentrated
-  *earlier* than the representational sharing peak. Strength/gradient is model-dependent (Qwen
-  strong, `script > language`-graded; Mistral-Nemo moderate, ~uniform). We report this as
-  **layer-dependent causal vulnerability**, *not* read-layer localization — a genuine temporal claim
-  needs causal tracing (see [Limitations](#limitations--planned-strengthening)).
+- **Graded sharing (H2):** with clean per-axis contrasts, cross-form alignment falls
+  `script ≈ notation > language`, every form far above a random floor — robust across **three**
+  model families (Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B) and three activation readouts. Magnitude
+  varies by family; the *ordering* doesn't.
+- **Localized, family-specifically:** sharing peaks in a layer band then collapses; mid-network in
+  Qwen, mid-late in Mistral-Nemo, late in Aya (the ordering, not the location, is universal).
+- **Causally *sufficient* everywhere:** patching the shared subspace with a value steers arithmetic
+  for *every* form, while a **norm-matched** random subspace does essentially nothing (Qwen2.5-7B,
+  Mistral-Nemo-Base). This is the strong, universal causal claim.
+- **Causally *necessary*, but model-dependent, and only under whole-span ablation:** ablating the
+  shared subspace (vs covariance-matched and shuffled-Fourier nulls) *drops* arithmetic accuracy —
+  helix-specifically — but for multi-token number-words you must ablate the **whole span**, not the
+  last token (last-token under-ablates). Under whole-span ablation **Qwen** relies on the shared
+  subspace across scripts *and* languages; **Mistral-Nemo** relies mainly for English digits and is
+  otherwise redundant (its apparent cross-form reliance was winner's curse, gone on held-out data).
 
-**Net:** the shared subspace is *both sufficient and causally load-bearing* for cross-form arithmetic
-across model families, with the vulnerability concentrated earlier than the sharing peak (a
-suggestive representation-vs-use gap, not yet established). Sharing is graded (`script > language`),
-and the strength of both sharing and necessity is model-dependent, but the qualitative picture — a
-partially-shared number geometry, causally used across surface forms — holds throughout. **Causal
-(Qwen, Mistral-Nemo) needs base models; Aya (instruct) is representational-only.**
+**Net:** number geometry is partially shared across scripts, notations, and languages; the shared
+directions are **causally sufficient** to drive arithmetic in every form, while **reliance** on them
+is helix-specific but **model-dependent** (broad in Qwen, English-digit-centric in Mistral-Nemo).
+Sharing is graded (`script > language`). **Causal results need base models; Aya (instruct) is
+representational-only.** We make *no* temporal "read-layer" claim — see
+[Limitations](#limitations--planned-strengthening).
 
 ---
 
@@ -211,28 +211,32 @@ below). The fixes left the representational results essentially unchanged.
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** shared, graded geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B |
+| **H1/H2** shared, graded geometry | `script ≈ notation > language` (clean contrasts), all ≫ floor | ✅ Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B |
 | **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ band is **family-specific** |
-| **H3** causal *sufficiency* | subspace patch steers all forms, random does not | ✅ Qwen2.5-7B + Mistral-Nemo (base) |
-| **H3** causal *necessity* | ablating the subspace at the *read layer* drops accuracy | ✅ both base models; strength model-dependent |
-| **representation ≠ use** | value read *earlier* than it is most shared | ✅ both base models |
+| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ Qwen2.5-7B + Mistral-Nemo (base) |
+| **H3** causal *necessity* | whole-span ablation drops accuracy, helix-specifically | ✅ **model-dependent**: Qwen broad (scripts+languages), Mistral English-digits mainly |
 
 > Note on models: the causal arithmetic readout needs a **base** model. Qwen2.5-7B, Mistral-Nemo-Base,
 > and Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
 > results only (its causal `clean_acc` ≈ 0 — a readout limitation, not a negative result).
 
-### H2 confirmed at scale, and replicated across families
-Per-axis `subspace_cos` (mean-pooled, vs `en_digit`), on real models:
+### H2 confirmed at scale, across families — with clean contrasts
+Per-axis `subspace_cos` using the **correct reference per axis** (script: en_digit↔digit-scripts;
+notation: en_digit↔en_word; language: **en_word↔foreign words**, not en_digit↔words — see
+`run_structure.py`). This fixes a reference-form confound: comparing en_digit to foreign *words*
+changes both notation and language, and inflates the apparent language drop.
 
-| axis | Qwen2.5-7B | Mistral-Nemo-Base | Aya-23-8B | floor |
-|---|---|---|---|---|
-| script | 0.71 | 0.80 | 0.53 | ~0.04 |
-| notation | 0.68 | 0.82 | 0.51 | ~0.04 |
-| language | 0.44 | 0.52 | 0.32 | ~0.04 |
+| axis | Qwen2.5-7B | Mistral-Nemo-Base | floor |
+|---|---|---|---|
+| script | 0.77 | 0.80 | ~0.04 |
+| notation | 0.74 | 0.83 | ~0.04 |
+| language | 0.52 | 0.60 | ~0.04 |
 
-`script ≈ notation > language` holds in **three independent families**, every form far above the
-floor. Note the magnitude is *not* universal — Aya (built for multilinguality) shows **weaker**
-sharing than Qwen, so what's robust is the **ordering**, not the amount.
+`script ≈ notation > language` holds in **three independent families** (Aya replicates the ordering;
+see the JSONs), every form far above the floor. Two honest notes: the magnitude is *not* universal
+(Aya is weaker), and with the clean contrast the **language gap is smaller** than an en_digit-referenced
+table suggests — number-words form their own moderately-shared cluster (e.g. Qwen `en_word↔es_word`
+0.55, `es_word↔fr_word` 0.50).
 
 ### Mechanistic: sharing is localized, but the band is family-specific
 The layer sweep (`run_layer_sweep.py`) shows cross-form `subspace_cos` rise, plateau, then
@@ -264,8 +268,11 @@ random control:
 
 Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
 words and Devanagari digits — **the model reads the shared helix regardless of surface form** —
-while an equal-dimension *random* subspace does essentially nothing (the interpretability-illusion
-control passes). Transport strength tracks the step-2 ordering (script > language).
+while an equal-dimension random subspace does essentially nothing. Crucially, this holds against a
+**norm-matched** random control (`run_necessity.py` interchange: subspace_shift ≫ matched_random,
+e.g. Qwen es_word 1.36 vs 0.06, devanagari 1.54 vs 0.08) — so the effect is the *specific helix
+directions*, not just "a large enough perturbation." That is what makes the illusion control
+meaningful. Replicated on Mistral-Nemo (weaker magnitudes, same pattern).
 
 **Caveat — across-layer causal localization is deliberately *not* a headline.** Raw transport
 magnitude isn't comparable across layers (an earlier intervention propagates through more layers →
@@ -275,48 +282,51 @@ bigger logit shift regardless of sharing). The layer-normalized `subspace/full` 
 the across-layer version is at best a language-forms supplement / future work (proper causal
 tracing).
 
-### H3 (necessity): the model relies on the shared subspace — but at the *read* layer
+### H3 (necessity): the model *relies* on the shared subspace — whole-span, and model-dependently
 Sufficiency shows the circuit *can* read an injected direction; necessity asks whether the model
-*relies* on the shared subspace. The key methodological lesson: **necessity must be measured at the
-layer the arithmetic circuit reads the value, which is not the representational sharing peak.**
+*relies* on the shared subspace. `run_necessity.py` mean-ablates the `en_digit`-fit helix subspace
+from a source number and measures the (restricted digit-choice) accuracy drop, against three nulls —
+Haar-random, **covariance-matched** (random subspace in the top activation PCA), and
+**shuffled-Fourier** (a helix fit through the same pipeline on shuffled labels). Two lessons, both
+from the review:
 
-`run_ablation_sweep.py` mean-ablates the `en_digit`-fit helix subspace at *every* layer and measures
-the per-form arithmetic-accuracy drop (Δ = acc after random-ablation − acc after helix-ablation),
-vs a multi-seed random-subspace control. Peak Δ per form:
+**1. Multi-token forms must be ablated over the *whole span*, not the last token.** Number-words are
+1.5–2 tokens; ablating only the last fragment leaves most of the value intact. Qwen helix-ablate
+accuracy vs the *strong* shuffled-Fourier null:
 
-| form | Qwen2.5-7B | Mistral-Nemo-Base |
+| Qwen form | last-token (helix vs shuf) | **whole-span** (helix vs shuf) |
 |---|---|---|
-| en_digit | **0.79** @ L7 | 0.25 @ L17 |
-| devanagari (script) | **0.50** @ L3 | 0.21 @ L18 |
-| es_word (language) | 0.08 (weak, all layers) | 0.25 @ L15 |
-| *sharing peak (for contrast)* | *L14* | *L22* |
+| es_word | 0.54 vs 0.54 — *not* helix-specific | **0.33 vs 0.43** — helix-specific |
+| fr_word | 0.62 vs 0.69 | **0.38 vs 0.50** |
+| de_word | 0.79 vs 0.80 — nothing | **0.29 vs 0.50** |
 
-Two findings:
+At the last token, language-word "necessity" is indistinguishable from the matched nulls. Under
+whole-span ablation it becomes clearly helix-specific. So the earlier "script > language necessity
+gradient" was largely a **last-fragment measurement artifact** — Spanish/French/German numbers *do*
+rely on the shared subspace. (Ablating the token *after* the number does ~nothing: a clean negative
+control.)
 
-1. **Necessity is real in both base models** — ablating the shared subspace drops arithmetic
-   accuracy — but only at the **read layer**. A *single-layer* ablation at the sharing peak
-   mismeasures it: Qwen's L14 undershot its true L7 peak, and Mistral-Nemo's L22 gave a spurious
-   ~0 (its read layer is L15–18). Random-subspace ablation does nothing at any layer.
-2. **Representation ≠ use.** In both models the value is *read earlier* than it is most cross-form
-   *shared* (Qwen read L3–7 vs shared L14; Mistral-Nemo read L15–18 vs shared L22) — a clean
-   dissociation between where number value is represented and where it is consumed.
+**2. Reliance is model-dependent.** Under whole-span ablation Qwen shows helix-specific necessity
+across scripts *and* languages. **Mistral-Nemo does not** — even whole-span, and across a full
+ablation-layer sweep, its cross-form necessity vanishes on held-out data (`run_ablation_sweep.py`
+discovery/test split: Mistral devanagari Δ 0.25→**0.08**, es_word 0.25→**0.00**; only en_digit holds
+at 0.25). Mistral relies on the shared subspace mainly for English digits and is otherwise redundant.
 
-Strength/gradient is **model-dependent**: Qwen shows strong, `script > language`-graded necessity
-(0.79 digits, 0.50 scripts, 0.08 language); Mistral-Nemo shows moderate, ~uniform necessity
-(0.21–0.25 across forms) — i.e. more distributed/redundant encoding.
+The nulls do real work: covariance-matched ablation removes *more* activation energy than the helix
+yet leaves arithmetic intact, so the effect is the specific helix directions, not removed energy.
 
-**Also — matched-source interchange** (`run_necessity.py`, patch the model's *real* `en_digit`
-activation, subspace-only): `subspace_shift` ≫ `random_shift` for all forms in both models,
-confirming sufficiency with genuine activations, independent of the Fourier fit.
+> **No temporal / "read-layer" claim.** An earlier ablation-layer analysis suggested the value is
+> "read earlier than it is shared." That does not hold up: the removed-helix energy varies wildly
+> across layers/forms (E@peak ranges ~4 to ~3700), so the ablation-sweep peak tracks *how much energy
+> the intervention removes*, not a read operation — and held-out splits shrink the apparent peaks.
+> We report only **layer-independent** necessity (whole-span, matched-null-controlled). A real
+> temporal claim needs causal tracing (see [Limitations](#limitations--planned-strengthening)).
 
-> Caveat: these sweeps use ~24 addition cases/form, so exact read-layers and magnitudes are noisy;
-> the qualitative picture (necessity real, read-layer earlier than sharing-layer) is robust.
-
-**Synthesis (the thesis).** The shared number subspace is **both sufficient and necessary** for
-cross-form arithmetic in multiple base-model families, with the value **read earlier than it is most
-shared**. Sharing is graded (`script > language`); the *strength* of both sharing and necessity is
-model-dependent, but the qualitative picture — a partially-shared number geometry, causally used
-across surface forms — holds throughout.
+**Synthesis (the thesis).** *Partial geometric universality, heterogeneous computational use.* The
+shared number subspace is **causally sufficient** to drive arithmetic across surface forms in
+multiple base families (norm-matched controlled); **reliance** on it is helix-specific but
+**model-dependent** — broad across scripts and languages in Qwen (whole-span), English-digit-centric
+in Mistral-Nemo. Sharing is graded (`script > language`), magnitude and reliance vary by family.
 
 ## Preliminary findings (Qwen2.5-1.5B, local validation — how the pipeline was calibrated)
 
@@ -367,31 +377,29 @@ reported as robustness checks.
 
 ## Limitations & planned strengthening
 
-Known weaknesses (from external review), and the fix for each. Claims are scoped accordingly above.
+External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ = open.
 
-1. **"Read layer" is not established — report as *layer-dependent causal vulnerability*.** The
-   ablation-layer sweep's per-layer Δ is confounded: earlier interventions propagate through more
-   blocks, the removed-norm ‖QₗQₗᵀ(hₗ−μₗ)‖ varies with depth, and max-over-layers with ~24 cases is a
-   winner's curse. *Fix:* match intervention norm across layers, report removed helix energy per
-   layer, normalize against a same-layer full/value-scramble intervention, select layers on held-out
-   examples, and use causal tracing / path patching before any "reads at layer L" claim.
-2. **H2 reference-form confound.** Every form is aligned to `en_digit`, so the "language" score
-   mixes notation + language changes. *Fix:* report the clean contrasts (script: en_digit↔digit-
-   scripts; notation: en_digit↔en_word; language: en_word↔foreign words) and the direct
-   `es_word↔fr_word`, `en_word↔es_word` cells from the pairwise matrix (`run_structure.py`).
-3. **Interventions only at the final number token.** Multi-token words may keep value in earlier
-   tokens, so weak Spanish necessity could be a last-fragment artifact. *Fix:* run final-token,
-   whole-span, and first-token-after variants; stratify by token count.
-4. **Random controls not matched.** A uniform random subspace removes less task-relevant energy than
-   the fitted helix, so "the illusion control passes" is too strong. *Fix:* norm-matched,
-   covariance-matched, and shuffled-value-Fourier subspaces, plus per-seed curves (no rounding) with
-   CIs across examples and seeds.
-5. **"Restricted digit-choice accuracy," not arithmetic accuracy.** The readout is argmax over the
-   ten digit tokens on single-digit sums. *Fix:* rename it; extend to multi-digit, subtraction,
-   comparison, full-continuation likelihood, word-form outputs, and same-representation operand+answer.
-6. **Reproducibility.** `experiments/` is gitignored. *Fix:* commit compact result files (per-example
-   clean/intervened logits, token positions, intervention norms, every random seed, model revision
-   hashes) + a script per table/figure.
+- ✅ **"Read-layer" temporal claim — DROPPED.** The ablation-layer Δ is confounded (earlier
+  interventions propagate further; removed energy varies wildly with depth, ~4 to ~3700; winner's
+  curse). We now report only layer-independent, whole-span necessity, and use a discovery/test split.
+  Any temporal claim would need causal tracing / path patching — ☐ open, not attempted.
+- ✅ **H2 reference-form confound — FIXED.** Clean contrasts use the correct reference per axis
+  (language = en_word↔foreign words), and the full pairwise matrix + word-to-word cells are reported
+  (`run_structure.py`). The ordering survives; the language gap shrinks.
+- ✅ **Final-token-only interventions — FIXED.** `--intervention-pos {last,span,after}`; whole-span
+  ablation is required for multi-token forms and *changed the finding* (language necessity is real).
+  Token counts are recorded.
+- ✅ **Matched controls — ADDED.** Ablation is tested against covariance-matched and shuffled-Fourier
+  nulls (not just Haar-random), with removed-energy reported; interchange uses a norm-matched random
+  control; per-seed curves are kept (no rounding) with mean±std.
+- ◐ **"Restricted digit-choice accuracy," not arithmetic accuracy.** Renamed throughout; the readout
+  is still argmax over the ten 0–9 tokens on single-digit sums. ☐ *Open:* extend to multi-digit,
+  subtraction, comparison, full-continuation likelihood, word-form outputs, and same-representation
+  operand+answer (main-conference reach).
+- ✅ **Reproducibility.** Compact result JSONs (model revision hash, intervention norms, per-seed
+  curves) are now committed (`.gitignore` keeps only large figures/caches out).
+- ☐ **Statistical power.** ~24–40 cases/form; report bootstrap CIs and expand the case set before
+  final figures.
 
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form
@@ -400,16 +408,16 @@ Known weaknesses (from external review), and the fix for each. Claims are scoped
 - [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
 - [x] Tooling: per-layer sweep, cross-run aggregator, tokenization diagnostic
 - [x] **Real run — Qwen2.5-7B**: H2 confirmed, sharing localized to a mid band
-- [x] **Step 3 sufficiency — causal transport** with full/subspace/random controls (Qwen + Mistral-Nemo)
-- [x] **Step 3 necessity — ablation-LAYER sweep**: necessity real at the *read layer* (≠ sharing peak) in both base models; strength model-dependent
-- [x] **Representation ≠ use** dissociation: value read earlier than it is most shared (both models)
+- [x] **Step 3 sufficiency — causal transport** + **norm-matched** control (Qwen + Mistral-Nemo)
+- [x] **Step 3 necessity — whole-span ablation vs matched nulls** (cov-matched + shuffled-Fourier): model-dependent (Qwen broad, Mistral English-digits)
 - [x] **Universality — Aya-23-8B** (representational) + **Mistral-Nemo-Base** (representational + causal): H2 replicates; localization family-specific
-- [x] **#6 pairwise matrix** (block structure) + **#7 geometry↔behavior** (found weak/frequency-confounded → not a headline)
-- [x] **External-review bug fixes**: consistent `nmax` normalization + rank-8 basis / SVD orthonormalization; all runs redone
+- [x] **#6 pairwise matrix + clean H2 contrasts** (reference-form confound fixed); #7 geometry↔behavior found weak (dropped as headline)
+- [x] **External-review hardening**: bug fixes; matched controls; multi-token interventions; held-out splits; committed result JSONs; **read-layer claim dropped**
 - [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model) — repr. + causal
-- [ ] Hardening: more addition cases (tighter necessity error bars); norm-matched random control; covariance-matched alignment null
+- [ ] **Extend eval** (main-conf reach): multi-digit, subtraction, comparison, word-form outputs, same-representation operand+answer; bootstrap CIs + more cases
+- [ ] Optional temporal claim: causal tracing / path patching (only if pursuing the representation-vs-use question)
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
-- [ ] Write-up — figures assembled (pairwise heatmap, ablation-layer sweep, transport, layer sweep), positioning vs FARS (2605.09496) + universal-numbers (2510.26285)
+- [ ] Write-up — figures: pairwise heatmap, whole-span necessity (matched nulls), transport (norm-matched), layer sweep; vs FARS (2605.09496) + universal-numbers (2510.26285)
 
 ## Key references
 - Kantamneni & Tegmark, *LLMs Use Trigonometry to Do Addition* — [2502.00873](https://arxiv.org/abs/2502.00873) ([code](https://github.com/subhashk01/LLM-addition))
