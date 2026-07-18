@@ -58,8 +58,8 @@ def random_subspace_floor(dirs_ref: np.ndarray, d_model: int, n_trials: int = 20
     return float(np.mean(vals))
 
 
-def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 30,
-                             train_frac: float = 0.7, seed: int = 0) -> float:
+def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 12,
+                             train_frac: float = 0.8, seed: int = 0) -> float:
     """Held-out R^2 of the best ROTATION aligning form X's geometry onto form Y's.
 
     Each form is reduced with its OWN PCA to k dims (so this is robust to the two forms
@@ -69,7 +69,11 @@ def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 30,
     for essentially any two competent number encoders. The discriminating, transport-enabling
     metric is subspace_alignment (same literal directions). Use this as a sanity floor and to
     distinguish 'different directions but same shape' (transport via a learned map) from
-    'no shared geometry / tokenization destroyed it' (this metric also drops)."""
+    'no shared geometry / tokenization destroyed it' (this metric also drops).
+
+    k is deliberately small (~helix dim): a k-dim orthogonal map has k(k-1)/2 free params, so a
+    large k overfits the ~70-80 train numbers and gives NEGATIVE held-out R^2 (seen at k=30 on
+    7B for byte-fragmented scripts). k=12 keeps the map well-determined; report robustness to k."""
     from sklearn.decomposition import PCA
 
     X = np.asarray(X, float); Y = np.asarray(Y, float)
