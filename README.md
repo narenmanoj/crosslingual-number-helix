@@ -82,6 +82,15 @@ The contribution is to connect these: take the *causally-validated helix* and th
 *causally-validated cross-lingual transport method* and answer the question both literatures
 skipped.
 
+**Closest adjacent work to differentiate from** (novelty recheck, mid-2026): *FARS —
+Format-Agnostic Reasoning Subspaces* ([2605.09496](https://arxiv.org/abs/2605.09496)) does
+cross-form activation patching across languages/symbolic forms, but for **general reasoning
+concepts via a generic PCA subspace**, not the **Fourier number helix**, and **without non-Latin
+numeral scripts**. Our contribution is the *object* (the specific helix) + the *cross-script*
+numeral dimension + causal transport — framed as "new object + new dimension," **not** "new
+method." The universal-numbers paper ([2510.26285](https://arxiv.org/abs/2510.26285)) explicitly
+disclaims cross-lingual coverage — it names our gap.
+
 ---
 
 ## How the code tests it
@@ -92,9 +101,11 @@ src/data.py                   # renders numbers across the two axes (script vs l
 src/extract.py                # loads a model, pulls the residual-stream vector at the number token
 src/helix.py                  # fits the helix (PCA + Fourier), R^2, shuffled-label control
 src/alignment.py              # subspace principal angles + Procrustes-CV + CKA + random floor
-src/patching.py               # STEP-3 skeleton: causal transport + the Makelov control checklist
-scripts/run_fit_and_align.py  # THE FIRST EXPERIMENT (steps 1+2), single layer
+src/patching.py               # STEP-3 machinery: helix reconstruct/subspace + full/subspace/random patch
+scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single layer
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
+scripts/run_transport.py      # STEP 3: causal cross-form transport (addition readout) + controls
+scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
@@ -158,7 +169,70 @@ to ~0), then (3) reports three alignment metrics vs the `en_digit` reference aga
 
 If **script-axis forms align more than language-axis forms**, that's direct evidence for **H2**.
 
-## Preliminary findings (Qwen2.5-1.5B, local validation — smoke signal, not evidence)
+## Results so far
+
+Status by hypothesis (as of this writing; Llama-3.1-8B pending HF gated-repo approval):
+
+| leg | result | status |
+|---|---|---|
+| **H1/H2** shared, value-driven geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B **and** Aya-23-8B |
+| **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ but band is **family-specific** |
+| **H3** causal transport | subspace patch steers, random does not | ✅ single-layer, Qwen2.5-7B |
+
+### H2 confirmed at scale, and replicated across families
+Per-axis `subspace_cos` (mean-pooled, vs `en_digit`), on real models:
+
+| axis | Qwen2.5-7B | Aya-23-8B | floor |
+|---|---|---|---|
+| script | 0.70 | 0.53 | ~0.04 |
+| notation | 0.69 | 0.51 | ~0.04 |
+| language | 0.43 | 0.32 | ~0.04 |
+
+`script ≈ notation > language` holds in **two independent families**, every form far above the
+floor. Note the magnitude is *not* universal — Aya (built for multilinguality) shows **weaker**
+sharing than Qwen, so what's robust is the **ordering**, not the amount.
+
+### Mechanistic: sharing is localized, but the band is family-specific
+The layer sweep (`run_layer_sweep.py`) shows cross-form `subspace_cos` rise, plateau, then
+collapse in the final layers — a shared-value → form-specific-output arc, with H2 holding at
+*every* layer. **But where it peaks moves with the model:**
+
+| model | sharing peak | profile |
+|---|---|---|
+| Qwen2.5-7B | ~L14 / 28 (mid) | single mid hump |
+| Aya-23-8B | ~L25 / 32 (late) | bimodal, mid dip, late global peak |
+
+So "shared **mid**-band" is *not* universal. What's universal: the ordering, sharing far above
+floor, and the late-layer collapse. Localization becoming a finding in itself (multilingual-
+specialized Aya integrates number-form later) is an honest cross-architecture result.
+
+### H3: cross-form causal transport works (single layer)
+`run_transport.py` patches a source number's residual (at the sharing-peak layer) with the
+`en_digit` helix's encoding of a *different* value, inside `"a + b = "`, and measures whether the
+answer moves toward the transported value. On Qwen2.5-7B @ L14, subspace `mean_shift` vs the
+random control:
+
+| source form | subspace_shift | random_shift | ratio |
+|---|---|---|---|
+| en_digit (within-form) | +0.98 | +0.03 | ~39× |
+| es_word (cross-language) | +1.13 | −0.00 | ~∞ |
+| fr_word (cross-language) | +1.11 | +0.04 | ~31× |
+| devanagari (cross-script) | +1.79 | +0.01 | ~224× |
+
+Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
+words and Devanagari digits — **the model reads the shared helix regardless of surface form** —
+while an equal-dimension *random* subspace does essentially nothing (the interpretability-illusion
+control passes). Transport strength tracks the step-2 ordering (script > language).
+
+**Caveat — across-layer causal localization is deliberately *not* a headline.** Raw transport
+magnitude isn't comparable across layers (an earlier intervention propagates through more layers →
+bigger logit shift regardless of sharing). The layer-normalized `subspace/full` metric
+(`run_transport_sweep.py`) fixes this for language forms but breaks for byte-fragmented scripts
+(full-patch isn't a clean ceiling there). So the **single-layer** transport is the core H3 claim;
+the across-layer version is at best a language-forms supplement / future work (proper causal
+tracing).
+
+## Preliminary findings (Qwen2.5-1.5B, local validation — how the pipeline was calibrated)
 
 A full 0–99 run on the small default model validated the pipeline and produced an early,
 promising pattern. **Treat as directional only** — 1.5B has a mediocre helix (R²≈0.4–0.5);
@@ -208,13 +282,16 @@ reported as robustness checks.
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form
 - [x] Step 2 — cross-form subspace alignment + Procrustes-CV + CKA (the go/no-go signal)
-- [x] Local validation on Qwen2.5-1.5B: controls calibrated, H2 ordering visible (see Preliminary findings)
+- [x] Local validation on Qwen2.5-1.5B: controls calibrated, H2 ordering visible
 - [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
-- [x] Tooling: per-layer sweep (`run_layer_sweep.py`) + cross-run aggregator (`aggregate_runs.py`)
-- [ ] Real run — Qwen2.5-7B (+ Llama-3.1-8B, Aya) at full 0–99, all three readouts, layer sweep + aggregate
-- [ ] Step 3 — causal cross-form transport with Makelov + random-direction controls (`src/patching.py`)
-- [ ] Time arm — repeat for dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
-- [ ] Scale across model families (Qwen / Llama-3.1 / Aya / Gemma-2) for a universality claim
+- [x] Tooling: per-layer sweep, cross-run aggregator, tokenization diagnostic
+- [x] **Real run — Qwen2.5-7B**: H2 confirmed, sharing localized to a mid band
+- [x] **Step 3 — causal cross-form transport** (single layer) with random + full + within-form controls
+- [x] **Universality — Aya-23-8B**: H2 replicates; localization is family-specific (late peak)
+- [ ] **Universality — Llama-3.1-8B** (blocked on HF gated-repo approval; the original helix model)
+- [ ] Hardening: multi-seed error bars, norm-matched random control
+- [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
+- [ ] Write-up — figures assembled, related-work positioning vs FARS (2605.09496) + universal-numbers (2510.26285)
 
 ## Key references
 - Kantamneni & Tegmark, *LLMs Use Trigonometry to Do Addition* — [2502.00873](https://arxiv.org/abs/2502.00873) ([code](https://github.com/subhashk01/LLM-addition))
@@ -222,4 +299,6 @@ reported as robustness checks.
 - Gurnee & Tegmark, *LMs Represent Space and Time* — [2310.02207](https://arxiv.org/abs/2310.02207)
 - *Separating Tongue from Thought* (cross-lingual concept patching) — [2411.08745](https://arxiv.org/abs/2411.08745)
 - *Effect of Scripts and Formats on LLM Numeracy* — [2601.15251](https://arxiv.org/abs/2601.15251)
+- *Language Models Learn Universal Representations of Numbers* (universal across models, disclaims cross-lingual) — [2510.26285](https://arxiv.org/abs/2510.26285)
+- *FARS — Format-Agnostic Reasoning Subspaces* (closest adjacent method; general concepts, not the helix) — [2605.09496](https://arxiv.org/abs/2605.09496)
 - Makelov et al., *An Interpretability Illusion for Subspace Activation Patching* — [2311.17030](https://arxiv.org/abs/2311.17030)
