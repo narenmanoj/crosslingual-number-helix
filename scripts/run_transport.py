@@ -61,11 +61,12 @@ def parse_args():
 
 
 def answer_token_id(tok, v: int) -> int:
-    for s in (f" {v}", f"{v}"):
+    # prompt ends with "= " (trailing space), so the model emits the BARE digit next.
+    for s in (f"{v}", f" {v}"):
         ids = tok.encode(s, add_special_tokens=False)
         if len(ids) == 1:
             return ids[0]
-    return tok.encode(f" {v}", add_special_tokens=False)[0]
+    return tok.encode(f"{v}", add_special_tokens=False)[0]
 
 
 @torch.no_grad()
@@ -125,7 +126,7 @@ def main():
         clean_correct = 0
         for (a, ap, b) in cases:
             a_str = D.FORMS[form].render(a)
-            prompt = f"{a_str} + {b} ="
+            prompt = f"{a_str} + {b} = "  # trailing space: next token is the answer digit itself
             try:
                 idxs = _number_token_indices(tok, prompt, a_str)
             except ValueError:
