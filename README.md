@@ -20,14 +20,17 @@ Evidence, on Qwen2.5-7B (base) and replicated representationally on Aya-23-8B:
 - **Localized, family-specifically:** sharing peaks in a layer band then collapses; the band is
   mid-network in Qwen, late in Aya (the ordering, not the location, is what's universal).
 - **Causally sufficient everywhere:** patching the shared subspace with a value steers arithmetic
-  for Spanish/French words and Devanagari digits, while a random subspace does nothing.
-- **Causally necessary for scripts, not languages:** ablating the shared subspace **breaks**
-  cross-script arithmetic but barely dents number-words — so languages keep an independent value
-  encoding. Representational (`subspace_cos`) and causal (ablation) gradients agree.
+  for *every* form (Spanish/French/German words, Devanagari/Arabic-Indic digits), while a random
+  subspace does nothing — the illusion control passes.
+- **Only partially necessary:** ablating the shared subspace hurts most forms *some*, but not
+  uniformly — English forms most, other scripts/languages less — so most forms retain redundant
+  value encoding outside it. Necessity is graded and moderately tracks representational sharing
+  (r≈0.55, n=7); it does **not** split cleanly by script vs language (n≈24/form, noisy).
 
-**Net:** the shared subspace is *sufficient* to drive arithmetic for every form and *necessary* for
-digits + non-Latin scripts; number-words carry redundant value info outside it. Cross-script
-sharing is deep (necessary + sufficient); cross-language sharing is sufficient-only.
+**Net:** the shared subspace is *universally sufficient* to drive arithmetic across forms and only
+*partially necessary* (forms keep independent value encoding to varying degrees). Sharing is graded
+— cleanly `script > language` **representationally** — but the causal necessity gradient is noisier
+and not a clean script/language dichotomy.
 
 ---
 
