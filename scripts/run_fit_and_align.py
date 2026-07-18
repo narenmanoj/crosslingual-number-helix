@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """Step 1+2: fit the number helix per surface-form, then measure cross-form alignment.
 
-This is the minimal first experiment. The headline numbers are, for each non-reference
-form: subspace mean_cos and linear CKA vs the en_digit reference -- read against the
-random-subspace floor and the shuffled-number controls.
+This is the minimal first experiment. For each non-reference form it reports subspace_cos
+(primary), procrustes_cv, and linear_CKA vs the en_digit reference -- against a random-subspace
+floor and a shuffled-label control -- then a PER-AXIS summary (script/notation/language),
+which is the headline H2 contrast (value-driven sharing => script >= notation >= language).
 
 Usage:
     python scripts/run_fit_and_align.py
@@ -125,6 +126,27 @@ def main():
     for f, axis, mc, cka, proc in rows:
         print(f"  {f:<20}{axis:<10}{mc:>14.3f}{proc:>16.3f}{cka:>14.3f}")
     print("=" * 86)
+
+    # --- per-axis summary: the headline H2 contrast (script vs notation vs language) ---
+    axis_summary = {}
+    for axis in ["script", "notation", "language"]:
+        vals = [(mc, proc, cka) for _, a, mc, cka, proc in rows if a == axis]
+        if vals:
+            arr = np.array(vals)
+            axis_summary[axis] = {
+                "n": len(vals),
+                "subspace_cos": float(arr[:, 0].mean()),
+                "procrustes_cv": float(arr[:, 1].mean()),
+                "linear_cka": float(arr[:, 2].mean()),
+            }
+    print("\nPER-AXIS MEANS (H2: value-driven sharing => script >= notation >= language)")
+    print("-" * 86)
+    print(f"  {'axis':<12}{'n':>4}{'subspace_cos':>16}{'procrustes_cv':>16}{'linear_CKA':>14}")
+    for axis, s in axis_summary.items():
+        print(f"  {axis:<12}{s['n']:>4}{s['subspace_cos']:>16.3f}{s['procrustes_cv']:>16.3f}{s['linear_cka']:>14.3f}")
+    print(f"  {'floor':<12}{'':>4}{floor:>16.3f}")
+    print("=" * 86)
+
     print("\nDecision table (subspace_cos is the primary, transport-relevant metric):")
     print("  subspace_cos >> floor                  -> SAME literal directions: direct patch works (step 3).")
     print("  subspace_cos ~floor BUT procrustes high -> same shape, rotated: transport needs an align map.")
@@ -137,6 +159,7 @@ def main():
         "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model,
         "r2": r2s, "r2_shuffled": shuf, "random_subspace_floor": floor,
+        "axis_summary": axis_summary,
         "alignment": [
             {"form": f, "axis": axis, "subspace_mean_cos": mc,
              "procrustes_cv_r2": proc, "linear_cka": cka}

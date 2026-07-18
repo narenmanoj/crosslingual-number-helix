@@ -1,14 +1,14 @@
 """Compare number geometry across surface forms.
 
-Two complementary metrics:
-  - subspace_alignment: principal angles between the two helix SUBSPACES (basis-free,
-    captures 'is the geometric object oriented the same way'). mean_cos in [0,1].
-  - linear_cka: representational similarity between the paired raw activation matrices
-    (rows aligned by number). Robust, scale/rotation invariant. In [0,1].
+Metrics (all in [0,1], rows paired by number):
+  - subspace_alignment: principal angles between the two helix SUBSPACES. PRIMARY,
+    transport-relevant metric -- 'same literal directions'. Read against random_subspace_floor.
+  - orthogonal_procrustes_cv: held-out R^2 of the best ROTATION aligning the two helices.
+    Necessary-not-sufficient ('same shape, maybe rotated').
+  - linear_cka: representational-similarity sanity check; weak discriminator here.
 
-Always read these against the controls:
-  - random-subspace floor (what alignment looks like for an unrelated subspace),
-  - shuffled-number CKA (what CKA looks like with no shared number indexing).
+Controls:
+  - random_subspace_floor (what subspace_cos looks like for an unrelated subspace).
 """
 from __future__ import annotations
 

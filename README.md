@@ -96,10 +96,18 @@ src/patching.py               # STEP-3 skeleton: causal transport + the Makelov 
 scripts/run_fit_and_align.py  # THE FIRST EXPERIMENT (steps 1+2)
 ```
 
-**Two axes of variation** (`src/data.py`) — both render the *same integer set in the same
-order*, so activation rows are paired across forms (this is what makes the comparisons valid):
-- **Script/form axis** (language fixed, glyphs vary): `en_digit`, `devanagari_digit`, `arabic_indic_digit`, `en_word`.
-- **Language axis** (meaning fixed, language varies): `en_word`, `es_word`, `fr_word`, `de_word`.
+**Three axes of variation** (`src/data.py`), ordered by how directly they test a
+*value-driven* shared helix. All forms render the *same integer set in the same order*, so
+activation rows are paired across forms (this is what makes the comparisons valid):
+- **Script axis — HEADLINE** (same language + notation, only glyphs change):
+  `en_digit` `37` vs `devanagari_digit` `३७` vs `arabic_indic_digit` `٣٧` vs `fullwidth_digit` `３７`.
+  A shared helix here is near-pure evidence of value-driven geometry, and it's the
+  least-covered contribution vs prior work (FARS 2605.09496 used Latin-script prose only).
+- **Notation axis** (digits vs spelled-out words, language fixed): `en_digit` vs `en_word`.
+- **Language axis** (spelled-out words, language varies): `en_word`, `es_word`, `fr_word`, `de_word`.
+
+**H2 prediction:** if sharing is value-driven, per-axis alignment should fall
+`script ≥ notation ≥ language`. `run_fit_and_align.py` prints this per-axis summary directly.
 
 ### Setup
 
