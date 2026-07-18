@@ -1,0 +1,203 @@
+#!/usr/bin/env python
+"""Does the CAUSAL transport effect peak where the CORRELATIONAL sharing peaks?
+
+Runs the step-3 subspace transport at every layer and plots subspace mean_shift vs layer per
+source form (with the random-subspace control). If a matching correlational layer-sweep JSON
+(sweep_{tag}_{pooling}.json) exists, it's overlaid on top so you can see whether the causal peak
+tracks the subspace_cos peak -- the result that unifies the mechanistic (step 2) and causal
+(step 3) stories, and explains why the transport layer differs by model (Qwen mid, Aya late).
+
+Only subspace + random modes are swept (subspace = the claim, random = the illusion control);
+`full` is uniform and uninformative across layers. Cost = cases x layers x 2 forward passes.
+
+Usage:
+    python scripts/run_transport_sweep.py --model Qwen/Qwen2.5-7B
+    python scripts/run_transport_sweep.py --model CohereLabs/aya-23-8B --layer-stride 1
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config as C
+from src import data as D
+from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.helix import fit_helix
+from src.patching import (
+    helix_reconstruct, helix_subspace_basis, random_subspace_basis,
+    make_patched_vector, patch_residual,
+)
+
+MODES = ["subspace", "random"]
+FORM_COLORS = {"en_digit": "#111111", "devanagari_digit": "#2563eb", "arabic_indic_digit": "#7c3aed",
+               "fullwidth_digit": "#0891b2", "en_word": "#059669", "es_word": "#dc2626", "fr_word": "#ea580c"}
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", default=C.MODEL)
+    p.add_argument("--forms", nargs="+", default=["en_digit", "es_word", "fr_word", "devanagari_digit"])
+    p.add_argument("--layer-stride", type=int, default=2, help="1 = every layer (slower)")
+    p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
+    p.add_argument("--max-sum", type=int, default=9)
+    p.add_argument("--pairs-per-form", type=int, default=20)
+    p.add_argument("--fit-max", type=int, default=99)
+    p.add_argument("--k-pca", type=int, default=C.K_PCA)
+    p.add_argument("--pooling", default="mean", help="only used to find the matching correlational sweep json")
+    p.add_argument("--device", default=C.DEVICE)
+    p.add_argument("--out-dir", default=C.OUT_DIR)
+    p.add_argument("--seed", type=int, default=0)
+    return p.parse_args()
+
+
+def answer_token_id(tok, v):
+    for s in (f"{v}", f" {v}"):
+        ids = tok.encode(s, add_special_tokens=False)
+        if len(ids) == 1:
+            return ids[0]
+    return tok.encode(f"{v}", add_special_tokens=False)[0]
+
+
+@torch.no_grad()
+def forward_logits(model, tok, device, prompt, want_hidden=False):
+    enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    out = model(**enc)
+    logits = out.logits[0, -1, :].float().cpu().numpy()
+    hs = None
+    if want_hidden:
+        hs = [h[0].float().cpu().numpy() for h in out.hidden_states]  # list[L+1] of [seq, d]
+    return logits, hs
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    rng = np.random.default_rng(args.seed)
+
+    print(f"\nModel: {args.model}")
+    model, tok, device = load_model(args.model, args.device)
+    d_model = model.config.hidden_size
+    n_layers = model.config.num_hidden_layers
+    sweep_layers = list(range(1, n_layers + 1, args.layer_stride))
+    print(f"Device: {device} | d_model: {d_model} | sweeping {len(sweep_layers)} layers\n")
+
+    # fit en_digit helix at ALL layers (one extraction), precompute per-layer geometry
+    fit_numbers = list(range(0, args.fit_max + 1))
+    acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers),
+                                    pooling="last")
+    targets = list(range(0, args.max_sum + 1))
+    fitL, Q_L, recon_L = {}, {}, {}
+    for L in sweep_layers:
+        f = fit_helix(acts[L], fit_numbers, k_pca=args.k_pca)
+        fitL[L] = f
+        Q_L[L] = helix_subspace_basis(f)
+        recon_L[L] = helix_reconstruct(f, targets)
+    r = Q_L[sweep_layers[0]].shape[1]
+    Q_rand = random_subspace_basis(r, d_model, seed=args.seed)
+    ans_ids = {v: answer_token_id(tok, v) for v in targets}
+
+    # per (form, layer, mode) accumulators
+    data = {form: {L: {m: [] for m in MODES} for L in sweep_layers} for form in args.forms}
+    for form in args.forms:
+        cases = []
+        for b in args.addends:
+            vals = [a for a in targets if a + b <= args.max_sum]
+            cases += [(a, ap, b) for a in vals for ap in vals if a != ap]
+        rng.shuffle(cases)
+        cases = cases[: args.pairs_per_form]
+        print(f"{form}: {len(cases)} cases x {len(sweep_layers)} layers")
+
+        for (a, ap, b) in cases:
+            a_str = D.FORMS[form].render(a)
+            prompt = f"{a_str} + {b} = "
+            try:
+                pos = _number_token_indices(tok, prompt, a_str)[-1]
+            except ValueError:
+                continue
+            Lc, hidden = forward_logits(model, tok, device, prompt, want_hidden=True)
+            base = Lc[ans_ids[ap + b]] - Lc[ans_ids[a + b]]
+            for L in sweep_layers:
+                h_orig = hidden[L][pos]
+                target_vec = recon_L[L][ap]
+                for mode in MODES:
+                    Qm = Q_L[L] if mode == "subspace" else Q_rand
+                    new_h = make_patched_vector(h_orig, target_vec, Q=Qm, mode=mode)
+                    handle = patch_residual(model, L - 1, pos,
+                                            torch.tensor(new_h, dtype=torch.float32, device=device))
+                    try:
+                        Lp, _ = forward_logits(model, tok, device, prompt)
+                    finally:
+                        handle.remove()
+                    shift = (Lp[ans_ids[ap + b]] - Lp[ans_ids[a + b]]) - base
+                    data[form][L][mode].append(float(shift))
+
+    # aggregate
+    curves = {form: {m: [float(np.mean(data[form][L][m])) if data[form][L][m] else np.nan
+                         for L in sweep_layers] for m in MODES}
+              for form in args.forms}
+
+    # try to load the matching correlational sweep for overlay
+    tag = args.model.split("/")[-1]
+    corr = None
+    corr_path = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.json")
+    if os.path.exists(corr_path):
+        with open(corr_path) as fh:
+            corr = json.load(fh)
+
+    # plot
+    npanel = 2 if corr else 1
+    fig, axes = plt.subplots(npanel, 1, figsize=(8, 3.4 * npanel), sharex=True)
+    axes = np.atleast_1d(axes)
+    if corr:
+        cl = [pl["layer"] for pl in corr["per_layer"]]
+        for ax_name in ["script", "language"]:
+            ys = [pl["axis_summary"].get(ax_name, {}).get("subspace_cos", np.nan) for pl in corr["per_layer"]]
+            axes[0].plot(cl, ys, lw=2, marker="o", ms=2, label=f"{ax_name} (corr.)")
+        axes[0].set_ylabel("subspace_cos\n(correlational)")
+        axes[0].set_title(f"{tag}: correlational sharing vs causal transport, by layer")
+        axes[0].grid(alpha=0.25); axes[0].legend(fontsize=8)
+    axc = axes[-1]
+    for form in args.forms:
+        axc.plot(sweep_layers, curves[form]["subspace"], lw=2, marker="o", ms=3,
+                 color=FORM_COLORS.get(form, None), label=form)
+    # random control: mean across forms, dashed
+    rand_mean = np.nanmean([curves[form]["random"] for form in args.forms], axis=0)
+    axc.plot(sweep_layers, rand_mean, ls="--", color="#888", lw=1.2, label="random (control)")
+    axc.axhline(0, color="#ccc", lw=0.8)
+    axc.set_ylabel("subspace mean_shift\n(causal, logits)")
+    axc.set_xlabel("layer")
+    axc.grid(alpha=0.25); axc.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    png = os.path.join(args.out_dir, f"transport_sweep_{tag}.png")
+    fig.savefig(png, dpi=130)
+
+    out = {"model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
+           "curves": curves, "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}
+    js = os.path.join(args.out_dir, f"transport_sweep_{tag}.json")
+    with open(js, "w") as fh:
+        json.dump(out, fh, indent=2)
+
+    # peak table
+    print("\n" + "=" * 60)
+    print("CAUSAL TRANSPORT PEAK (subspace mean_shift) per form")
+    print("-" * 60)
+    for form in args.forms:
+        ys = np.array(curves[form]["subspace"])
+        pk = sweep_layers[int(np.nanargmax(ys))]
+        print(f"  {form:<20} peak L{pk:<3} shift={np.nanmax(ys):.3f}")
+    print("=" * 60)
+    print(f"Saved -> {js}\n         {png}\n")
+
+
+if __name__ == "__main__":
+    main()
