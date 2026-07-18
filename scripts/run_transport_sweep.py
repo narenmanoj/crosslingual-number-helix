@@ -38,7 +38,7 @@ from src.patching import (
     make_patched_vector, patch_residual,
 )
 
-MODES = ["subspace", "random"]
+MODES = ["subspace", "full", "random"]  # full = layer-normalizer (ceiling intervention at each L)
 FORM_COLORS = {"en_digit": "#111111", "devanagari_digit": "#2563eb", "arabic_indic_digit": "#7c3aed",
                "fullwidth_digit": "#0891b2", "en_word": "#059669", "es_word": "#dc2626", "fr_word": "#ea580c"}
 
@@ -46,7 +46,10 @@ FORM_COLORS = {"en_digit": "#111111", "devanagari_digit": "#2563eb", "arabic_ind
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=C.MODEL)
-    p.add_argument("--forms", nargs="+", default=["en_digit", "es_word", "fr_word", "devanagari_digit"])
+    # Default = CROSS-FORM only. en_digit (within-form) is excluded: at early layers, patching a
+    # bare digit just swaps token identity (a trivial monotone-decaying effect that dominates the
+    # y-axis), so it doesn't test transport of the *shared* geometry across the layer sweep.
+    p.add_argument("--forms", nargs="+", default=["es_word", "fr_word", "devanagari_digit", "arabic_indic_digit"])
     p.add_argument("--layer-stride", type=int, default=2, help="1 = every layer (slower)")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9)
@@ -141,12 +144,25 @@ def main():
                     shift = (Lp[ans_ids[ap + b]] - Lp[ans_ids[a + b]]) - base
                     data[form][L][mode].append(float(shift))
 
-    # aggregate
+    # aggregate raw curves
     curves = {form: {m: [float(np.mean(data[form][L][m])) if data[form][L][m] else np.nan
                          for L in sweep_layers] for m in MODES}
               for form in args.forms}
 
-    # try to load the matching correlational sweep for overlay
+    # LAYER-NORMALIZED metric: fraction of the full-patch effect carried by the helix subspace.
+    # Raw mean_shift is confounded -- an intervention at an earlier layer propagates through more
+    # layers and yields a bigger logit shift regardless of sharing. Dividing by the full-patch
+    # effect at the SAME layer (the ceiling any intervention there can reach) cancels that
+    # amplification, leaving 'how much of the transportable value the helix subspace carries'.
+    MIN_FULL = 0.3
+    frac = {}
+    for form in args.forms:
+        frac[form] = []
+        for i in range(len(sweep_layers)):
+            s, f = curves[form]["subspace"][i], curves[form]["full"][i]
+            frac[form].append(s / f if (f is not None and not np.isnan(f) and f > MIN_FULL) else np.nan)
+
+    # correlational overlay
     tag = args.model.split("/")[-1]
     corr = None
     corr_path = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.json")
@@ -154,7 +170,6 @@ def main():
         with open(corr_path) as fh:
             corr = json.load(fh)
 
-    # plot
     npanel = 2 if corr else 1
     fig, axes = plt.subplots(npanel, 1, figsize=(8, 3.4 * npanel), sharex=True)
     axes = np.atleast_1d(axes)
@@ -164,17 +179,14 @@ def main():
             ys = [pl["axis_summary"].get(ax_name, {}).get("subspace_cos", np.nan) for pl in corr["per_layer"]]
             axes[0].plot(cl, ys, lw=2, marker="o", ms=2, label=f"{ax_name} (corr.)")
         axes[0].set_ylabel("subspace_cos\n(correlational)")
-        axes[0].set_title(f"{tag}: correlational sharing vs causal transport, by layer")
+        axes[0].set_title(f"{tag}: correlational sharing vs helix-specific causal transport")
         axes[0].grid(alpha=0.25); axes[0].legend(fontsize=8)
     axc = axes[-1]
     for form in args.forms:
-        axc.plot(sweep_layers, curves[form]["subspace"], lw=2, marker="o", ms=3,
+        axc.plot(sweep_layers, frac[form], lw=2, marker="o", ms=3,
                  color=FORM_COLORS.get(form, None), label=form)
-    # random control: mean across forms, dashed
-    rand_mean = np.nanmean([curves[form]["random"] for form in args.forms], axis=0)
-    axc.plot(sweep_layers, rand_mean, ls="--", color="#888", lw=1.2, label="random (control)")
     axc.axhline(0, color="#ccc", lw=0.8)
-    axc.set_ylabel("subspace mean_shift\n(causal, logits)")
+    axc.set_ylabel("subspace / full\n(helix-specific fraction)")
     axc.set_xlabel("layer")
     axc.grid(alpha=0.25); axc.legend(fontsize=8, ncol=2)
     fig.tight_layout()
@@ -182,20 +194,25 @@ def main():
     fig.savefig(png, dpi=130)
 
     out = {"model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
-           "curves": curves, "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}
+           "curves": curves, "frac_subspace_over_full": frac,
+           "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}
     js = os.path.join(args.out_dir, f"transport_sweep_{tag}.json")
     with open(js, "w") as fh:
         json.dump(out, fh, indent=2)
 
-    # peak table
-    print("\n" + "=" * 60)
-    print("CAUSAL TRANSPORT PEAK (subspace mean_shift) per form")
-    print("-" * 60)
+    # peak table (layer-normalized)
+    print("\n" + "=" * 72)
+    print("HELIX-SPECIFIC TRANSPORT PEAK  (subspace/full, layer-normalized)  per form")
+    print("-" * 72)
     for form in args.forms:
-        ys = np.array(curves[form]["subspace"])
+        ys = np.array(frac[form], dtype=float)
+        raw_pk = sweep_layers[int(np.nanargmax(curves[form]["subspace"]))]
+        if np.isnan(ys).all():
+            print(f"  {form:<20} (no layers with reliable full-patch effect)")
+            continue
         pk = sweep_layers[int(np.nanargmax(ys))]
-        print(f"  {form:<20} peak L{pk:<3} shift={np.nanmax(ys):.3f}")
-    print("=" * 60)
+        print(f"  {form:<20} norm-peak L{pk:<3} frac={np.nanmax(ys):.2f}   (raw subspace peak was L{raw_pk})")
+    print("=" * 72)
     print(f"Saved -> {js}\n         {png}\n")
 
 
