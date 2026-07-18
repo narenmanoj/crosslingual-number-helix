@@ -64,9 +64,9 @@ def main():
     print("\n" + "=" * 92)
     print("CROSS-RUN SUMMARY — per-axis subspace_cos (H2: script >= notation >= language)")
     print("-" * 92)
-    print(f"  {'model':<20}{'pool':<12}{'layer':>6}{'floor':>8}{'script':>10}{'notation':>10}{'language':>10}")
+    print(f"  {'model':<26}{'pool':<12}{'layer':>6}{'floor':>8}{'script':>10}{'notation':>10}{'language':>10}")
     for r in rows:
-        print(f"  {r['model']:<20}{str(r['pooling']):<12}{str(r['layer']):>6}{r['floor']:>8.3f}"
+        print(f"  {r['model']:<26}{str(r['pooling']):<12}{str(r['layer']):>6}{r['floor']:>8.3f}"
               f"{r['script']:>10.3f}{r['notation']:>10.3f}{r['language']:>10.3f}")
     print("=" * 92)
 
