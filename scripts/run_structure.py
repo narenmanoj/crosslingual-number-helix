@@ -1,0 +1,214 @@
+#!/usr/bin/env python
+"""Review items #6 + #7 in one model load.
+
+(#6) PAIRWISE form x form alignment matrix -- the full compatibility structure, not just
+     everything-vs-en_digit. Shows e.g. whether es/fr/de number-words cluster, whether the
+     digit-scripts cluster, etc. Saved as a heatmap.
+
+(#7) GEOMETRY <-> BEHAVIOR link -- does a form's representational sharing with en_digit predict
+     how reliably the model does ARITHMETIC in that form? Correlate per-form subspace_cos (vs
+     en_digit) with per-form single-digit addition accuracy. Optionally also vs the necessity
+     ablation-Delta if a necessity_*.json is present. Base model needed for the arithmetic readout.
+
+Usage:
+    python scripts/run_structure.py --model Qwen/Qwen2.5-7B --layer 14
+    python scripts/run_structure.py --model meta-llama/Llama-3.1-8B --layer <sweep-peak>
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr, spearmanr
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config as C
+from src import data as D
+from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.helix import fit_helix
+from src.alignment import subspace_alignment, random_subspace_floor
+
+AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", default=C.MODEL)
+    p.add_argument("--forms", nargs="+",
+                   default=["en_digit", "devanagari_digit", "arabic_indic_digit", "fullwidth_digit",
+                            "en_word", "es_word", "fr_word", "de_word"])
+    p.add_argument("--layer", default="scan", help="'scan' (max mean R^2) or an int")
+    p.add_argument("--pooling", default="mean", choices=["last", "mean", "prompt_last"])
+    p.add_argument("--max-num", type=int, default=99)
+    p.add_argument("--acc-addends", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    p.add_argument("--max-sum", type=int, default=9)
+    p.add_argument("--k-pca", type=int, default=C.K_PCA)
+    p.add_argument("--device", default=C.DEVICE)
+    p.add_argument("--out-dir", default=C.OUT_DIR)
+    return p.parse_args()
+
+
+def answer_token_id(tok, v):
+    for s in (f"{v}", f" {v}"):
+        ids = tok.encode(s, add_special_tokens=False)
+        if len(ids) == 1:
+            return ids[0]
+    return tok.encode(f"{v}", add_special_tokens=False)[0]
+
+
+@torch.no_grad()
+def arithmetic_accuracy(model, tok, device, form, addends, max_sum, ans_ids):
+    """Fraction of single-token-answer additions the model gets right, with the number in `form`."""
+    cases = [(a, b) for b in addends for a in range(0, max_sum + 1) if a + b <= max_sum]
+    ok = 0
+    n = 0
+    for a, b in cases:
+        a_str = D.FORMS[form].render(a)
+        prompt = f"{a_str} + {b} = "
+        enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        logits = model(**enc).logits[0, -1, :].float().cpu().numpy()
+        pred = int(np.argmax([logits[ans_ids[v]] for v in range(0, max_sum + 1)]))
+        ok += int(pred == a + b)
+        n += 1
+    return ok / max(n, 1), n
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    forms = list(args.forms)
+
+    print(f"\nModel: {args.model} | pooling {args.pooling}")
+    model, tok, device = load_model(args.model, args.device)
+    d_model = model.config.hidden_size
+    n_layers = model.config.num_hidden_layers
+    numbers = list(range(0, args.max_num + 1))
+
+    acts = {}
+    for f in forms:
+        print(f"Extracting: {f}")
+        acts[f] = extract_form_activations(model, tok, device, D.build_prompts(f, numbers), pooling=args.pooling)
+
+    # choose layer
+    if args.layer == "scan":
+        cands = list(range(max(1, n_layers // 3), n_layers + 1))
+        best, bestr2 = cands[0], -1e9
+        for L in cands:
+            m = float(np.mean([fit_helix(acts[f][L], numbers, k_pca=args.k_pca)["r2"] for f in forms]))
+            if m > bestr2:
+                best, bestr2 = L, m
+        layer = best
+        print(f"\nChosen layer {layer} (mean R^2={bestr2:.3f})")
+    else:
+        layer = int(args.layer)
+
+    fits = {f: fit_helix(acts[f][layer], numbers, k_pca=args.k_pca) for f in forms}
+    floor = random_subspace_floor(fits[forms[0]]["helix_dirs_model"], d_model)
+
+    # ---------- (#6) pairwise subspace_cos matrix ----------
+    N = len(forms)
+    M = np.eye(N)
+    for i in range(N):
+        for j in range(i + 1, N):
+            c = subspace_alignment(fits[forms[i]]["helix_dirs_model"], fits[forms[j]]["helix_dirs_model"])["mean_cos"]
+            M[i, j] = M[j, i] = c
+
+    # ---------- (#7) arithmetic accuracy per form ----------
+    ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
+    acc = {}
+    for f in forms:
+        a, n = arithmetic_accuracy(model, tok, device, f, args.acc_addends, args.max_sum, ans_ids)
+        acc[f] = a
+    ref = "en_digit"
+    ref_i = forms.index(ref)
+    share = {f: float(M[forms.index(f), ref_i]) for f in forms}  # subspace_cos vs en_digit
+
+    # correlation over NON-reference forms (en_digit's self-cos=1 would anchor trivially)
+    corr_forms = [f for f in forms if f != ref]
+    xs = np.array([share[f] for f in corr_forms])
+    ys = np.array([acc[f] for f in corr_forms])
+    pear = pearsonr(xs, ys)
+    spear = spearmanr(xs, ys)
+
+    # optional necessity-Delta correlation
+    tag = args.model.split("/")[-1]
+    nec_path = os.path.join(args.out_dir, f"necessity_{tag}_L{layer}.json")
+    nec_corr = None
+    if os.path.exists(nec_path):
+        with open(nec_path) as fh:
+            nec = json.load(fh)["ablation"]
+        common = [f for f in corr_forms if f in nec]
+        if len(common) >= 3:
+            nx = np.array([share[f] for f in common])
+            nd = np.array([nec[f]["acc_random_ablate_mean"] - nec[f]["acc_helix_ablate"] for f in common])
+            nec_corr = {"forms": common, "pearson_r": float(pearsonr(nx, nd)[0])}
+
+    # ---------- report ----------
+    print("\n" + "=" * 78)
+    print(f"(#6) PAIRWISE subspace_cos matrix @ L{layer}   (floor={floor:.3f})")
+    print("-" * 78)
+    print("       " + "".join(f"{f[:7]:>9}" for f in forms))
+    for i, f in enumerate(forms):
+        print(f"  {f[:7]:>7}" + "".join(f"{M[i, j]:>9.2f}" for j in range(N)))
+    print("=" * 78)
+    print(f"\n(#7) GEOMETRY <-> BEHAVIOR   (subspace_cos vs en_digit  ~  arithmetic accuracy)")
+    print("-" * 78)
+    print(f"  {'form':<20}{'axis':<10}{'share(cos)':>12}{'arith_acc':>11}")
+    for f in forms:
+        print(f"  {f:<20}{D.FORMS[f].axis:<10}{share[f]:>12.3f}{acc[f]:>11.2f}")
+    print("-" * 78)
+    print(f"  Pearson r = {pear[0]:.3f} (p={pear[1]:.3f}) | Spearman r = {spear[0]:.3f}  (n={len(corr_forms)} non-ref forms)")
+    if nec_corr:
+        print(f"  subspace_cos vs necessity-Delta: Pearson r = {nec_corr['pearson_r']:.3f} (n={len(nec_corr['forms'])})")
+    print("=" * 78)
+
+    # ---------- plots ----------
+    fig, ax = plt.subplots(figsize=(1.1 * N + 1, 1.0 * N))
+    im = ax.imshow(M, vmin=0, vmax=1, cmap="viridis")
+    ax.set_xticks(range(N)); ax.set_xticklabels(forms, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(N)); ax.set_yticklabels(forms, fontsize=8)
+    for i in range(N):
+        for j in range(N):
+            ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center",
+                    color="white" if M[i, j] < 0.6 else "black", fontsize=7)
+    ax.set_title(f"{tag}: pairwise number-helix subspace_cos (L{layer})")
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    fig.tight_layout()
+    hm = os.path.join(args.out_dir, f"pairwise_{tag}_L{layer}.png")
+    fig.savefig(hm, dpi=130)
+
+    fig2, ax2 = plt.subplots(figsize=(6, 5))
+    for f in corr_forms:
+        ax2.scatter(share[f], acc[f], color=AXIS_COLORS[D.FORMS[f].axis], s=60)
+        ax2.annotate(f, (share[f], acc[f]), fontsize=7, xytext=(4, 3), textcoords="offset points")
+    ax2.axvline(floor, ls="--", color="#aaa", lw=1, label=f"floor {floor:.02f}")
+    ax2.set_xlabel("subspace_cos vs en_digit (representational sharing)")
+    ax2.set_ylabel("single-digit arithmetic accuracy (behavioral)")
+    ax2.set_title(f"{tag}: geometry predicts numeracy?  r={pear[0]:.2f}")
+    ax2.grid(alpha=0.25); ax2.legend(fontsize=8)
+    fig2.tight_layout()
+    sc = os.path.join(args.out_dir, f"geombehav_{tag}_L{layer}.png")
+    fig2.savefig(sc, dpi=130)
+
+    out = {"model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
+           "forms": forms, "pairwise_subspace_cos": M.tolist(),
+           "share_vs_en_digit": share, "arithmetic_acc": acc,
+           "geometry_behavior": {"pearson_r": float(pear[0]), "pearson_p": float(pear[1]),
+                                 "spearman_r": float(spear[0]), "n": len(corr_forms)},
+           "necessity_corr": nec_corr}
+    js = os.path.join(args.out_dir, f"structure_{tag}_L{layer}.json")
+    with open(js, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nSaved -> {js}\n         {hm}\n         {sc}\n")
+
+
+if __name__ == "__main__":
+    main()
