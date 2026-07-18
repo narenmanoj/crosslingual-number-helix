@@ -24,20 +24,19 @@ Evidence, on Qwen2.5-7B (base) and replicated representationally on Aya-23-8B:
 - **Causally sufficient everywhere:** patching the shared subspace with a value steers arithmetic
   for *every* form (Spanish/French/German words, Devanagari/Arabic-Indic digits), while a random
   subspace does nothing — the illusion control passes (Qwen2.5-7B, Mistral-Nemo-Base).
-- **Causally necessary too — at the *read* layer:** ablating the shared subspace *drops* arithmetic
-  accuracy in both base models — but only when ablated at the layer the circuit actually reads
-  (found via an ablation-layer sweep). Strength is model-dependent (Qwen strong, `script > language`
-  graded; Mistral-Nemo moderate, ~uniform).
-- **Representation ≠ use (a dissociation):** in both models the value is *read* by the arithmetic
-  circuit *earlier* than the layer where it is most cross-form *shared* (Qwen: read ~L3–7, shared
-  ~L14; Mistral-Nemo: read ~L15–18, shared ~L22).
+- **Causally necessary too (layer-dependent):** ablating the shared subspace *drops* arithmetic
+  accuracy in both base models, at some layers more than others — the vulnerability is concentrated
+  *earlier* than the representational sharing peak. Strength/gradient is model-dependent (Qwen
+  strong, `script > language`-graded; Mistral-Nemo moderate, ~uniform). We report this as
+  **layer-dependent causal vulnerability**, *not* read-layer localization — a genuine temporal claim
+  needs causal tracing (see [Limitations](#limitations--planned-strengthening)).
 
-**Net:** the shared subspace is *both sufficient and necessary* for cross-form arithmetic across
-model families — the number value is *read earlier than it is most shared*. Sharing is graded
-(`script > language`), and the strength of both sharing and necessity is model-dependent, but the
-qualitative picture — a partially-shared number geometry, causally used across surface forms —
-holds throughout. **Causal (Qwen, Mistral-Nemo) needs base models; Aya (instruct) is
-representational-only.**
+**Net:** the shared subspace is *both sufficient and causally load-bearing* for cross-form arithmetic
+across model families, with the vulnerability concentrated earlier than the sharing peak (a
+suggestive representation-vs-use gap, not yet established). Sharing is graded (`script > language`),
+and the strength of both sharing and necessity is model-dependent, but the qualitative picture — a
+partially-shared number geometry, causally used across surface forms — holds throughout. **Causal
+(Qwen, Mistral-Nemo) needs base models; Aya (instruct) is representational-only.**
 
 ---
 
@@ -365,6 +364,34 @@ reported as robustness checks.
    Re-verify on each new model, since tokenization differs.
 3. **Decodability ≠ causal use**: a probe finding the helix ≠ the model using it. The causal
    transport step plus controls are what close this gap.
+
+## Limitations & planned strengthening
+
+Known weaknesses (from external review), and the fix for each. Claims are scoped accordingly above.
+
+1. **"Read layer" is not established — report as *layer-dependent causal vulnerability*.** The
+   ablation-layer sweep's per-layer Δ is confounded: earlier interventions propagate through more
+   blocks, the removed-norm ‖QₗQₗᵀ(hₗ−μₗ)‖ varies with depth, and max-over-layers with ~24 cases is a
+   winner's curse. *Fix:* match intervention norm across layers, report removed helix energy per
+   layer, normalize against a same-layer full/value-scramble intervention, select layers on held-out
+   examples, and use causal tracing / path patching before any "reads at layer L" claim.
+2. **H2 reference-form confound.** Every form is aligned to `en_digit`, so the "language" score
+   mixes notation + language changes. *Fix:* report the clean contrasts (script: en_digit↔digit-
+   scripts; notation: en_digit↔en_word; language: en_word↔foreign words) and the direct
+   `es_word↔fr_word`, `en_word↔es_word` cells from the pairwise matrix (`run_structure.py`).
+3. **Interventions only at the final number token.** Multi-token words may keep value in earlier
+   tokens, so weak Spanish necessity could be a last-fragment artifact. *Fix:* run final-token,
+   whole-span, and first-token-after variants; stratify by token count.
+4. **Random controls not matched.** A uniform random subspace removes less task-relevant energy than
+   the fitted helix, so "the illusion control passes" is too strong. *Fix:* norm-matched,
+   covariance-matched, and shuffled-value-Fourier subspaces, plus per-seed curves (no rounding) with
+   CIs across examples and seeds.
+5. **"Restricted digit-choice accuracy," not arithmetic accuracy.** The readout is argmax over the
+   ten digit tokens on single-digit sums. *Fix:* rename it; extend to multi-digit, subtraction,
+   comparison, full-continuation likelihood, word-form outputs, and same-representation operand+answer.
+6. **Reproducibility.** `experiments/` is gitignored. *Fix:* commit compact result files (per-example
+   clean/intervened logits, token positions, intervention norms, every random seed, model revision
+   hashes) + a script per table/figure.
 
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form

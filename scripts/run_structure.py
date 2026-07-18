@@ -138,18 +138,41 @@ def main():
     pear = pearsonr(xs, ys)
     spear = spearmanr(xs, ys)
 
-    # optional necessity-Delta correlation
+    # optional necessity-Delta correlation (necessity_{tag}_L{layer}_{pos}.json; take newest match)
     tag = args.model.split("/")[-1]
-    nec_path = os.path.join(args.out_dir, f"necessity_{tag}_L{layer}.json")
+    import glob
+    nec_files = sorted(glob.glob(os.path.join(args.out_dir, f"necessity_{tag}_L{layer}*.json")))
     nec_corr = None
-    if os.path.exists(nec_path):
-        with open(nec_path) as fh:
-            nec = json.load(fh)["ablation"]
-        common = [f for f in corr_forms if f in nec]
+    if nec_files:
+        nec = json.load(open(nec_files[-1]))["ablation"]
+        common = [f for f in corr_forms if f in nec and "controls" in nec[f]]
         if len(common) >= 3:
             nx = np.array([share[f] for f in common])
-            nd = np.array([nec[f]["acc_random_ablate_mean"] - nec[f]["acc_helix_ablate"] for f in common])
+            nd = np.array([nec[f]["controls"]["random"]["acc_mean"] - nec[f]["acc_helix_ablate"] for f in common])
             nec_corr = {"forms": common, "pearson_r": float(pearsonr(nx, nd)[0])}
+
+    # ---------- CLEAN CONTRASTS (fix the reference-form confound) ----------
+    # "language" must compare number-WORDS to number-WORDS (en_word <-> foreign), not en_digit <-> words.
+    idx = {f: i for i, f in enumerate(forms)}
+
+    def mean_cell(ref, targets):
+        vals = [M[idx[ref], idx[t]] for t in targets if t in idx and t != ref]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    scripts = [f for f in forms if D.FORMS[f].axis == "script"]        # en_digit + digit-scripts
+    notation = [f for f in forms if D.FORMS[f].axis == "notation"]     # en_word
+    langs = [f for f in forms if D.FORMS[f].axis == "language"]        # es/fr/de words
+    clean_contrasts = {
+        "script (en_digit <-> digit-scripts)": mean_cell("en_digit", [f for f in scripts if f != "en_digit"]),
+        "notation (en_digit <-> en_word)": mean_cell("en_digit", notation),
+        "language (en_word <-> foreign words)": mean_cell("en_word", langs) if "en_word" in idx else float("nan"),
+    }
+    # direct word-to-word cells reviewers asked to see
+    def cell(a, b):
+        return float(M[idx[a], idx[b]]) if a in idx and b in idx else float("nan")
+    word_cells = {f"{a}<->{b}": cell(a, b) for (a, b) in
+                  [("en_word", "es_word"), ("en_word", "fr_word"), ("es_word", "fr_word"),
+                   ("es_word", "de_word"), ("fr_word", "de_word")]}
 
     # ---------- report ----------
     print("\n" + "=" * 78)
@@ -158,6 +181,12 @@ def main():
     print("       " + "".join(f"{f[:7]:>9}" for f in forms))
     for i, f in enumerate(forms):
         print(f"  {f[:7]:>7}" + "".join(f"{M[i, j]:>9.2f}" for j in range(N)))
+    print("=" * 78)
+    print("\nCLEAN CONTRASTS (correct reference per axis -- avoids the en_digit reference confound)")
+    print("-" * 78)
+    for k, v in clean_contrasts.items():
+        print(f"  {k:<44}{v:>8.3f}")
+    print("  word-to-word cells: " + "  ".join(f"{k}={v:.2f}" for k, v in word_cells.items()))
     print("=" * 78)
     print(f"\n(#7) GEOMETRY <-> BEHAVIOR   (subspace_cos vs en_digit  ~  arithmetic accuracy)")
     print("-" * 78)
@@ -200,6 +229,7 @@ def main():
 
     out = {"model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(),
+           "clean_contrasts": clean_contrasts, "word_to_word_cells": word_cells,
            "share_vs_en_digit": share, "arithmetic_acc": acc,
            "geometry_behavior": {"pearson_r": float(pear[0]), "pearson_p": float(pear[1]),
                                  "spearman_r": float(spear[0]), "n": len(corr_forms)},

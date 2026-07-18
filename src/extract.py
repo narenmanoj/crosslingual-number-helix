@@ -6,6 +6,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 
+def model_revision(model, name: str) -> dict:
+    """Reproducibility stamp: model id + resolved commit hash (if available) + dtype."""
+    cfg = getattr(model, "config", None)
+    return {
+        "name": name,
+        "commit_hash": getattr(cfg, "_commit_hash", None),
+        "dtype": str(getattr(model, "dtype", None)),
+    }
+
+
 def pick_device(device: str | None) -> str:
     if device and device != "auto":
         return device

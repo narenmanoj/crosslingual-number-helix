@@ -2,7 +2,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-experiments/
+# Commit compact JSON result files for reproducibility (each carries model revision hash,
+# intervention norms, per-seed curves); ignore large figures / activation caches.
+experiments/*.png
+experiments/*.pt
+experiments/*.npz
 *.pt
 *.npz
 .DS_Store

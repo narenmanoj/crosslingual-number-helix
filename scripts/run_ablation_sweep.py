@@ -36,10 +36,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
 from src.helix import fit_helix
 from src.patching import (
-    helix_subspace_basis, random_subspace_basis, make_patched_vector, patch_residual,
+    helix_subspace_basis, random_subspace_basis, make_patched_vector, patch_residual, subspace_energy,
 )
 
 FORM_COLORS = {"en_digit": "#111111", "devanagari_digit": "#2563eb", "arabic_indic_digit": "#7c3aed",
@@ -115,13 +115,15 @@ def main():
     ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
     print(f"Device: {device} | d_model {d_model} | sweeping {len(sweep_layers)} layers | r={r}\n")
 
-    curves = {}   # form -> {"clean": acc, "helix": [per layer], "rand": [per layer]}
+    rng = np.random.default_rng(args.seed)
+    curves = {}
     for form in args.forms:
         cases = [(a, b) for b in args.addends for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
-        clean_ok = 0
-        helix_ok = {L: 0 for L in sweep_layers}
-        rand_ok = {L: 0 for L in sweep_layers}
-        n = 0
+        # per-case correctness so we can aggregate honestly (per-seed, no rounding) + split
+        clean_c = []
+        helix_c = {L: [] for L in sweep_layers}
+        rand_c = {L: [[] for _ in range(args.n_seeds)] for L in sweep_layers}
+        energy_c = {L: [] for L in sweep_layers}
         for (a, b) in cases:
             a_str = D.FORMS[form].render(a)
             prompt = f"{a_str} + {b} = "
@@ -129,28 +131,37 @@ def main():
                 pos = _number_token_indices(tok, prompt, a_str)[-1]
             except ValueError:
                 continue
-            n += 1
             Lc, hidden = forward_logits(model, tok, device, prompt, want_hidden=True)
-            clean_ok += int(int(np.argmax([Lc[ans_ids[v]] for v in range(0, args.max_sum + 1)])) == a + b)
+            clean_c.append(int(int(np.argmax([Lc[ans_ids[v]] for v in range(0, args.max_sum + 1)])) == a + b))
             for L in sweep_layers:
                 h_orig = hidden[L][pos]
                 h_hel = make_patched_vector(h_orig, mean_L[L], Q=Q_L[L], mode="subspace")
-                helix_ok[L] += patched_correct(model, tok, device, prompt, L - 1, pos, h_hel, ans_ids, args.max_sum, a + b)
-                rr = [patched_correct(model, tok, device, prompt, L - 1, pos,
-                                      make_patched_vector(h_orig, mean_L[L], Q=Qr, mode="subspace"),
-                                      ans_ids, args.max_sum, a + b) for Qr in Q_rands]
-                rand_ok[L] += int(round(np.mean(rr)))  # per-case majority; averaged below
-        n = max(n, 1)
-        curves[form] = {
-            "clean": clean_ok / n,
-            "helix": [helix_ok[L] / n for L in sweep_layers],
-            "rand": [rand_ok[L] / n for L in sweep_layers],
-        }
+                helix_c[L].append(patched_correct(model, tok, device, prompt, L - 1, pos, h_hel, ans_ids, args.max_sum, a + b))
+                energy_c[L].append(subspace_energy(Q_L[L], h_orig, mean_L[L]))
+                for si, Qr in enumerate(Q_rands):
+                    rand_c[L][si].append(patched_correct(model, tok, device, prompt, L - 1, pos,
+                        make_patched_vector(h_orig, mean_L[L], Q=Qr, mode="subspace"),
+                        ans_ids, args.max_sum, a + b))
+        nc = len(clean_c)
+        seed_acc = lambda L, sub: [float(np.mean([rand_c[L][si][i] for i in sub])) for si in range(args.n_seeds)]
+        helix_acc = [float(np.mean(helix_c[L])) for L in sweep_layers]
+        rand_acc = [float(np.mean(seed_acc(L, range(nc)))) for L in sweep_layers]
+        rand_std = [float(np.std(seed_acc(L, range(nc)))) for L in sweep_layers]
+        delta_full = [rand_acc[i] - helix_acc[i] for i in range(len(sweep_layers))]
+        energy = [float(np.mean(energy_c[L])) for L in sweep_layers]
+        # discovery/test split -> honest peak (winner's curse): pick layer on disc, report Δ on test
+        idx = np.arange(nc); rng.shuffle(idx); half = nc // 2
+        disc, test = idx[:half], idx[half:]
+        d_disc = [float(np.mean(seed_acc(L, disc))) - float(np.mean([helix_c[L][i] for i in disc])) for L in sweep_layers]
+        pk = int(np.nanargmax(d_disc)) if half else 0
+        d_test = (float(np.mean(seed_acc(sweep_layers[pk], test)))
+                  - float(np.mean([helix_c[sweep_layers[pk]][i] for i in test]))) if len(test) else float("nan")
+        curves[form] = {"clean": float(np.mean(clean_c)), "helix": helix_acc, "rand": rand_acc,
+                        "rand_std": rand_std, "delta": delta_full, "removed_energy": energy,
+                        "peak_layer_discovery": sweep_layers[pk], "delta_at_peak_heldout": d_test}
         print(f"  done {form} (clean_acc={curves[form]['clean']:.2f})")
 
-    # necessity Delta per layer = acc(random-ablate) - acc(helix-ablate)
-    delta = {f: [curves[f]["rand"][i] - curves[f]["helix"][i] for i in range(len(sweep_layers))]
-             for f in args.forms}
+    delta = {f: curves[f]["delta"] for f in args.forms}
 
     # correlational overlay
     tag = args.model.split("/")[-1]
@@ -180,20 +191,26 @@ def main():
     png = os.path.join(args.out_dir, f"ablation_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
-           "curves": curves, "necessity_delta": delta}
+    out = {"model_revision": model_revision(model, args.model), "layers": sweep_layers, "r": r,
+           "forms": args.forms, "n_seeds": args.n_seeds,
+           "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")
     with open(js, "w") as fh:
         json.dump(out, fh, indent=2)
 
-    # peak table
-    print("\n" + "=" * 66)
-    print("NECESSITY PEAK per form  (max Δ over layers; ~0 everywhere => redundant)")
-    print("-" * 66)
+    # peak table -- report the HELD-OUT Δ at the discovery-selected peak (avoids winner's curse),
+    # plus the removed-helix-energy at that layer (intervention norm varies with depth: the raw peak
+    # is NOT a clean read-layer; see README Limitations).
+    print("\n" + "=" * 80)
+    print("NECESSITY PEAK per form  (peak layer chosen on DISCOVERY half, Δ reported on HELD-OUT half)")
+    print("-" * 80)
+    print(f"  {'form':<18}{'clean':>7}{'peak-L(disc)':>14}{'Δ heldout':>11}{'raw max-Δ':>11}{'E@peak':>9}")
     for f in args.forms:
         d = np.array(delta[f])
-        pk = sweep_layers[int(np.argmax(d))]
-        print(f"  {f:<20} clean={curves[f]['clean']:.2f}  peak-Δ={d.max():.2f} @ L{pk:<3}  (mean Δ={d.mean():.2f})")
+        pk_disc = curves[f]["peak_layer_discovery"]
+        e_at = curves[f]["removed_energy"][sweep_layers.index(pk_disc)]
+        print(f"  {f:<18}{curves[f]['clean']:>7.2f}{pk_disc:>14}{curves[f]['delta_at_peak_heldout']:>11.2f}"
+              f"{d.max():>11.2f}{e_at:>9.1f}")
     print("=" * 66)
     print(f"Saved -> {js}\n         {png}\n")
 
