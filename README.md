@@ -7,6 +7,28 @@ This is a mechanistic-interpretability research project aimed at an ML-conferenc
 (workshop as a first milestone). This README explains the idea, why it's worth doing, the
 specific hypothesis, and how the code tests it.
 
+## Summary of findings (working thesis)
+
+> **Number geometry is *partially* universal across surface forms.** LLMs represent integers on a
+> Fourier "helix"; that helix subspace is **shared** across scripts, notations, and languages —
+> but only *partially*, and the degree of sharing degrades as the surface transformation grows.
+
+Evidence, on Qwen2.5-7B (base) and replicated representationally on Aya-23-8B:
+
+- **Graded sharing (H2):** cross-form alignment falls `script ≈ notation > language`, every form far
+  above a random floor — robust across two model families and three activation readouts.
+- **Localized, family-specifically:** sharing peaks in a layer band then collapses; the band is
+  mid-network in Qwen, late in Aya (the ordering, not the location, is what's universal).
+- **Causally sufficient everywhere:** patching the shared subspace with a value steers arithmetic
+  for Spanish/French words and Devanagari digits, while a random subspace does nothing.
+- **Causally necessary for scripts, not languages:** ablating the shared subspace **breaks**
+  cross-script arithmetic but barely dents number-words — so languages keep an independent value
+  encoding. Representational (`subspace_cos`) and causal (ablation) gradients agree.
+
+**Net:** the shared subspace is *sufficient* to drive arithmetic for every form and *necessary* for
+digits + non-Latin scripts; number-words carry redundant value info outside it. Cross-script
+sharing is deep (necessary + sufficient); cross-language sharing is sufficient-only.
+
 ---
 
 ## The idea in one minute
@@ -104,7 +126,8 @@ src/alignment.py              # subspace principal angles + Procrustes-CV + CKA 
 src/patching.py               # STEP-3 machinery: helix reconstruct/subspace + full/subspace/random patch
 scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single layer
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
-scripts/run_transport.py      # STEP 3: causal cross-form transport (addition readout) + controls
+scripts/run_transport.py      # STEP 3 sufficiency: causal cross-form transport + full/subspace/random controls
+scripts/run_necessity.py      # STEP 3 necessity: helix-subspace ablation + matched-source interchange
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
@@ -171,13 +194,20 @@ If **script-axis forms align more than language-axis forms**, that's direct evid
 
 ## Results so far
 
-Status by hypothesis (as of this writing; Llama-3.1-8B pending HF gated-repo approval):
+Status by hypothesis (as of this writing; Llama-3.1-8B pending HF gated-repo approval).
+All results use the **bug-fixed** helix code (consistent `nmax` normalization; rank-8 basis, see
+below). The fixes left the representational results essentially unchanged.
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** shared, value-driven geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B **and** Aya-23-8B |
+| **H1/H2** shared, graded geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B **and** Aya-23-8B |
 | **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ but band is **family-specific** |
-| **H3** causal transport | subspace patch steers, random does not | ✅ single-layer, Qwen2.5-7B |
+| **H3** causal *sufficiency* | subspace patch steers all forms, random does not | ✅ Qwen2.5-7B (base) |
+| **H3** causal *necessity* | ablation breaks scripts, not languages (graded) | ✅ Qwen2.5-7B (base) |
+
+> Note on models: the causal arithmetic readout needs a **base** model. Qwen2.5-7B and
+> Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
+> results only (its causal `clean_acc` ≈ 0 — a readout limitation, not a negative result).
 
 ### H2 confirmed at scale, and replicated across families
 Per-axis `subspace_cos` (mean-pooled, vs `en_digit`), on real models:
@@ -206,7 +236,7 @@ So "shared **mid**-band" is *not* universal. What's universal: the ordering, sha
 floor, and the late-layer collapse. Localization becoming a finding in itself (multilingual-
 specialized Aya integrates number-form later) is an honest cross-architecture result.
 
-### H3: cross-form causal transport works (single layer)
+### H3 (sufficiency): cross-form causal transport works (single layer)
 `run_transport.py` patches a source number's residual (at the sharing-peak layer) with the
 `en_digit` helix's encoding of a *different* value, inside `"a + b = "`, and measures whether the
 answer moves toward the transported value. On Qwen2.5-7B @ L14, subspace `mean_shift` vs the
@@ -231,6 +261,35 @@ bigger logit shift regardless of sharing). The layer-normalized `subspace/full` 
 (full-patch isn't a clean ceiling there). So the **single-layer** transport is the core H3 claim;
 the across-layer version is at best a language-forms supplement / future work (proper causal
 tracing).
+
+### H3 (necessity): the model *naturally uses* the shared subspace — and it's graded
+Sufficiency shows the circuit *can* read an injected direction; necessity asks whether the model
+*relies* on the shared subspace when processing a foreign-form number. `run_necessity.py` runs two
+tests on Qwen2.5-7B @ L14 (multi-seed random controls):
+
+**(A) Ablation** — mean-ablate the `en_digit`-fit helix subspace from a *source* number and re-measure arithmetic accuracy:
+
+| form | clean | helix-ablate | random-ablate | Δ (rand − helix) |
+|---|---|---|---|---|
+| en_digit | 0.83 | 0.21 | 0.83 ± 0.05 | **0.62** |
+| devanagari (script) | 0.92 | 0.54 | 0.93 ± 0.02 | **0.39** |
+| es_word (language) | 0.62 | 0.54 | 0.60 ± 0.02 | 0.06 |
+| fr_word (language) | 0.75 | 0.67 | 0.73 ± 0.02 | 0.06 |
+
+Ablating the shared subspace **breaks cross-script arithmetic** but **barely dents number-words** —
+so languages keep value information *outside* the shared subspace. Random-subspace ablation does
+nothing anywhere.
+
+**(B) Matched-source interchange** — transport the model's *real* `en_digit` activation (not the
+Fourier reconstruction), subspace-only: `subspace_shift` ≫ `random_shift` for **all** forms
+(es 1.04, fr 1.00, devanagari 1.61, en 0.92; random ≈ 0). So sufficiency holds with genuine
+activations, independent of fit quality.
+
+**Synthesis (the thesis).** Sufficient everywhere, necessary only for scripts →
+**cross-script sharing is deep (necessary + sufficient); cross-language sharing is sufficient-only**
+(number-words retain an independent value encoding). The causal necessity gradient *matches* the
+representational `subspace_cos` gradient — two independent methods agreeing that sharing degrades
+with surface-transformation distance.
 
 ## Preliminary findings (Qwen2.5-1.5B, local validation — how the pipeline was calibrated)
 
@@ -286,10 +345,13 @@ reported as robustness checks.
 - [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
 - [x] Tooling: per-layer sweep, cross-run aggregator, tokenization diagnostic
 - [x] **Real run — Qwen2.5-7B**: H2 confirmed, sharing localized to a mid band
-- [x] **Step 3 — causal cross-form transport** (single layer) with random + full + within-form controls
-- [x] **Universality — Aya-23-8B**: H2 replicates; localization is family-specific (late peak)
-- [ ] **Universality — Llama-3.1-8B** (blocked on HF gated-repo approval; the original helix model)
-- [ ] Hardening: multi-seed error bars, norm-matched random control
+- [x] **Step 3 sufficiency — causal transport** (single layer) with full/subspace/random controls
+- [x] **Step 3 necessity — ablation + matched-source interchange**: graded, script-necessary/language-sufficient-only
+- [x] **Universality — Aya-23-8B** (representational): H2 replicates; localization is family-specific (late peak)
+- [x] **Bug fixes** (external review): consistent `nmax` normalization + rank-8 basis / SVD orthonormalization; all runs redone
+- [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model) — repr. + causal
+- [ ] Pairwise form×form alignment matrix (word-to-word) + geometry↔behavior link (`subspace_cos` vs arithmetic accuracy)
+- [ ] Hardening: norm-matched random control; stronger (covariance-matched) alignment null
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
 - [ ] Write-up — figures assembled, related-work positioning vs FARS (2605.09496) + universal-numbers (2510.26285)
 
