@@ -68,11 +68,18 @@ def extract_form_activations(
     per_layer: list[list] = [[] for _ in range(n_layers)]
 
     for _, number_str, prompt in tqdm(prompts, desc="extract", leave=False):
-        idxs = _number_token_indices(tok, prompt, number_str)
         enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
         out = model(**enc)
         hs = out.hidden_states  # tuple length n_layers, each [1, seq, d_model]
-        sel = idxs[-1:] if pooling == "last" else idxs
+        seq_len = hs[0].shape[1]
+        if pooling == "prompt_last":
+            # final token of the whole prompt (the carrier after the number). The number is
+            # fully consumed here; number-varying signal = the integrated value. Sidesteps the
+            # "which sub-token of a multi-token number holds the value" problem across forms.
+            sel = [seq_len - 1]
+        else:
+            idxs = _number_token_indices(tok, prompt, number_str)
+            sel = idxs[-1:] if pooling == "last" else idxs  # "last" span token, else "mean"
         for layer in range(n_layers):
             vecs = hs[layer][0, sel, :].float().mean(0)  # [d_model]
             per_layer[layer].append(vecs.cpu().numpy())

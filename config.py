@@ -9,7 +9,9 @@ MODEL = "Qwen/Qwen2.5-1.5B"
 NUMBERS = list(range(0, 100))          # 0..99, matching the original helix work
 FORMS = None                           # None -> src.data.DEFAULT_FORMS
 LAYER = "scan"                         # "scan" picks the layer with best mean helix R^2, or an int
-POOLING = "last"                       # "last" token of the number span, or "mean"
+POOLING = "mean"                       # "mean" over number span (primary: apples-to-apples
+                                       # across forms w/ different token counts), "last", or
+                                       # "prompt_last" (final carrier token). Report all 3.
 K_PCA = 20
 DEVICE = "auto"
 OUT_DIR = "experiments"

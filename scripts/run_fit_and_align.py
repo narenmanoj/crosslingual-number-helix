@@ -37,7 +37,7 @@ def parse_args():
     p.add_argument("--forms", nargs="+", default=C.FORMS or D.DEFAULT_FORMS)
     p.add_argument("--reference", default=None, help="reference form (default: first in --forms)")
     p.add_argument("--layer", default=str(C.LAYER), help="'scan' or an int")
-    p.add_argument("--pooling", default=C.POOLING, choices=["last", "mean"])
+    p.add_argument("--pooling", default=C.POOLING, choices=["last", "mean", "prompt_last"])
     p.add_argument("--max-num", type=int, default=max(C.NUMBERS))
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--device", default=C.DEVICE)
