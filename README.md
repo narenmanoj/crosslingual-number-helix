@@ -93,7 +93,10 @@ src/extract.py                # loads a model, pulls the residual-stream vector 
 src/helix.py                  # fits the helix (PCA + Fourier), R^2, shuffled-label control
 src/alignment.py              # subspace principal angles + Procrustes-CV + CKA + random floor
 src/patching.py               # STEP-3 skeleton: causal transport + the Makelov control checklist
-scripts/run_fit_and_align.py  # THE FIRST EXPERIMENT (steps 1+2)
+scripts/run_fit_and_align.py  # THE FIRST EXPERIMENT (steps 1+2), single layer
+scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
+scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
+scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
 
 **Three axes of variation** (`src/data.py`), ordered by how directly they test a
@@ -155,20 +158,60 @@ to ~0), then (3) reports three alignment metrics vs the `en_digit` reference aga
 
 If **script-axis forms align more than language-axis forms**, that's direct evidence for **H2**.
 
+## Preliminary findings (Qwen2.5-1.5B, local validation — smoke signal, not evidence)
+
+A full 0–99 run on the small default model validated the pipeline and produced an early,
+promising pattern. **Treat as directional only** — 1.5B has a mediocre helix (R²≈0.4–0.5);
+the quantitative story needs the 7B+ cluster runs.
+
+- **Controls behave.** Shuffled-label R² collapses to ~0.08 vs real ~0.5; random-subspace
+  floor is 0.064. The helix is real and the metrics are calibrated.
+- **H2 ordering already visible.** Per-axis `subspace_cos`: script ≈ notation **>** language,
+  with every form far above the 0.064 floor (sharing is *graded*, not present/absent).
+- **Sharing lives in a mid-network band, then re-specializes** (`run_layer_sweep.py`): cross-form
+  `subspace_cos` rises through early layers, plateaus ~L5–20 (peak L12), then collapses toward the
+  floor in the final ~5 layers — a shared-value → form-specific-output arc. H2 holds at *every*
+  layer (the axis curves never cross). Site the step-3 causal transport in the mid band (~L5–13).
+
+### Tokenizer confound — checked, and it is NOT the explanation
+The number occupies very different token counts per form (≈1.9 for digits, 3.8–4.4 for
+number-words; non-Latin digits shred into 4 undecodable byte tokens — see
+`scripts/inspect_tokenization.py`). So `pooling='last'` was reading number-*words* off
+phonetic fragments (`treinta y siete → 'iete'`, `quarante-deux → 'ux'`). We tested whether the
+language-axis drop is just this artifact by re-running under three readouts:
+
+| axis | `last` | `mean` | `prompt_last` | floor |
+|---|---|---|---|---|
+| script | 0.77 | 0.75 | 0.59 | 0.06 |
+| notation | 0.76 | 0.70 | 0.57 | 0.06 |
+| language | 0.59 | 0.44 | 0.32 | 0.06 |
+
+The language drop **persists (and widens) under every readout**, so it is *not* a pooling
+artifact — script/notation genuinely share the helix more than number-words do. Readout choice
+*does* move the magnitudes, so we pin a principled primary: **`mean`-over-span** (the default),
+which avoids both the last-fragment confound and the different-carrier-token confound that
+`prompt_last` introduces for es/fr (read at `es`/`est`, not `is`). `last` and `prompt_last` are
+reported as robustness checks.
+
 ## Known threats (design around these, don't discover them in review)
 1. **Interpretability illusion** ([Makelov et al., 2311.17030](https://arxiv.org/abs/2311.17030)):
    a subspace patch can change behavior via a *dormant parallel pathway* even if it isn't the
    model's real mechanism. The step-3 controls in `src/patching.py` exist for exactly this — a
    successful transport is necessary but not sufficient.
-2. **Tokenization confounds**: `37` vs `thirty-seven` vs `३७` follow different token paths and
-   BPE shreds multi-digit strings. A "not shared" result could be a tokenization artifact —
-   control span length / pooling before concluding.
+2. **Tokenization confounds** — *checked (see Preliminary findings)*: `37` vs `thirty-seven` vs
+   `३७` follow different token paths and BPE shreds multi-digit strings. Verified the H2 result
+   is robust to the readout via `--pooling {last,mean,prompt_last}`; `mean`-over-span is primary.
+   Re-verify on each new model, since tokenization differs.
 3. **Decodability ≠ causal use**: a probe finding the helix ≠ the model using it. The causal
    transport step plus controls are what close this gap.
 
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form
 - [x] Step 2 — cross-form subspace alignment + Procrustes-CV + CKA (the go/no-go signal)
+- [x] Local validation on Qwen2.5-1.5B: controls calibrated, H2 ordering visible (see Preliminary findings)
+- [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
+- [x] Tooling: per-layer sweep (`run_layer_sweep.py`) + cross-run aggregator (`aggregate_runs.py`)
+- [ ] Real run — Qwen2.5-7B (+ Llama-3.1-8B, Aya) at full 0–99, all three readouts, layer sweep + aggregate
 - [ ] Step 3 — causal cross-form transport with Makelov + random-direction controls (`src/patching.py`)
 - [ ] Time arm — repeat for dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
 - [ ] Scale across model families (Qwen / Llama-3.1 / Aya / Gemma-2) for a universality claim

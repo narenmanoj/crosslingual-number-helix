@@ -167,7 +167,7 @@ def main():
         ],
     }
     tag = args.model.split("/")[-1]
-    path = os.path.join(args.out_dir, f"align_{tag}_L{layer}.json")
+    path = os.path.join(args.out_dir, f"align_{tag}_{args.pooling}_L{layer}.json")
     with open(path, "w") as fh:
         json.dump(result, fh, indent=2)
     print(f"Saved -> {path}\n")
