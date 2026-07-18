@@ -160,28 +160,30 @@ def main():
             "n_cases": len(cases),
             "clean_acc": clean_correct / n,
             "modes": {m: {"mean_shift": float(np.mean(per_mode[m]["shift"])) if per_mode[m]["shift"] else float("nan"),
+                          "pos_shift_rate": float(np.mean([s > 0 for s in per_mode[m]["shift"]])) if per_mode[m]["shift"] else float("nan"),
                           "flip_rate": float(np.mean(per_mode[m]["flip"])) if per_mode[m]["flip"] else float("nan"),
                           "n": per_mode[m]["n"]}
                       for m in MODES},
         }
 
-    # --- report ---
-    print("\n" + "=" * 84)
-    print(f"CAUSAL TRANSPORT  (en_digit helix @ L{args.layer}, r={r})  [mean_shift>0 & flip_rate high = works]")
-    print("-" * 84)
-    hdr = f"  {'source form':<20}{'axis':<9}{'clean_acc':>10}"
-    for m in MODES:
-        hdr += f"{m+'_shift':>15}{m+'_flip':>13}"
-    print(hdr)
+    # --- report (long format: one row per form x mode) ---
+    print("\n" + "=" * 82)
+    print(f"CAUSAL TRANSPORT  (en_digit helix @ L{args.layer}, r={r})")
+    print("  primary = mean_shift (logits toward a'+b) & pos_rate; random mode is the illusion control")
+    print("-" * 82)
+    print(f"  {'source form':<20}{'axis':<9}{'mode':<10}{'clean_acc':>10}{'mean_shift':>12}{'pos_rate':>10}{'flip':>7}")
     for form in args.forms:
         R = results[form]
-        row = f"  {form:<20}{R['axis']:<9}{R['clean_acc']:>10.2f}"
         for m in MODES:
-            row += f"{R['modes'][m]['mean_shift']:>15.3f}{R['modes'][m]['flip_rate']:>13.2f}"
-        print(row)
-    print("=" * 84)
-    print("Expect: full & subspace -> positive shift + flips; random -> ~0 (illusion control);")
-    print("        en_digit (within-form) should be the strongest. Low clean_acc => readout unreliable.\n")
+            M = R["modes"][m]
+            print(f"  {form:<20}{R['axis']:<9}{m:<10}{R['clean_acc']:>10.2f}"
+                  f"{M['mean_shift']:>12.3f}{M['pos_shift_rate']:>10.2f}{M['flip_rate']:>7.2f}")
+    print("=" * 82)
+    print("Works iff: full/subspace mean_shift large & positive (pos_rate>>0.5), AND random")
+    print("mean_shift ~0 -- judge the random control by MAGNITUDE (>>10x smaller), not pos_rate:")
+    print("a random subspace leaks a tiny consistent nudge (~r/d_model), so its pos_rate is unreliable.")
+    print("en_digit (within-form) should be strongest. flip is a strict lower bound (helix R^2~0.5 =>")
+    print("partial reconstruction -> shift moves the answer without always flipping the argmax).\n")
 
     out = {"model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "results": results}
