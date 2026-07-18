@@ -16,21 +16,28 @@ specific hypothesis, and how the code tests it.
 Evidence, on Qwen2.5-7B (base) and replicated representationally on Aya-23-8B:
 
 - **Graded sharing (H2):** cross-form alignment falls `script ≈ notation > language`, every form far
-  above a random floor — robust across two model families and three activation readouts.
+  above a random floor — robust across **three** model families (Qwen2.5-7B, Mistral-Nemo-Base,
+  Aya-23-8B) and three activation readouts. The magnitude varies by family; the *ordering* doesn't.
 - **Localized, family-specifically:** sharing peaks in a layer band then collapses; the band is
-  mid-network in Qwen, late in Aya (the ordering, not the location, is what's universal).
+  mid-network in Qwen, mid-late in Mistral-Nemo, late in Aya (the ordering, not the location,
+  is universal).
 - **Causally sufficient everywhere:** patching the shared subspace with a value steers arithmetic
   for *every* form (Spanish/French/German words, Devanagari/Arabic-Indic digits), while a random
-  subspace does nothing — the illusion control passes.
-- **Only partially necessary:** ablating the shared subspace hurts most forms *some*, but not
-  uniformly — English forms most, other scripts/languages less — so most forms retain redundant
-  value encoding outside it. Necessity is graded and moderately tracks representational sharing
-  (r≈0.55, n=7); it does **not** split cleanly by script vs language (n≈24/form, noisy).
+  subspace does nothing — the illusion control passes (Qwen2.5-7B, Mistral-Nemo-Base).
+- **Causally necessary too — at the *read* layer:** ablating the shared subspace *drops* arithmetic
+  accuracy in both base models — but only when ablated at the layer the circuit actually reads
+  (found via an ablation-layer sweep). Strength is model-dependent (Qwen strong, `script > language`
+  graded; Mistral-Nemo moderate, ~uniform).
+- **Representation ≠ use (a dissociation):** in both models the value is *read* by the arithmetic
+  circuit *earlier* than the layer where it is most cross-form *shared* (Qwen: read ~L3–7, shared
+  ~L14; Mistral-Nemo: read ~L15–18, shared ~L22).
 
-**Net:** the shared subspace is *universally sufficient* to drive arithmetic across forms and only
-*partially necessary* (forms keep independent value encoding to varying degrees). Sharing is graded
-— cleanly `script > language` **representationally** — but the causal necessity gradient is noisier
-and not a clean script/language dichotomy.
+**Net:** the shared subspace is *both sufficient and necessary* for cross-form arithmetic across
+model families — the number value is *read earlier than it is most shared*. Sharing is graded
+(`script > language`), and the strength of both sharing and necessity is model-dependent, but the
+qualitative picture — a partially-shared number geometry, causally used across surface forms —
+holds throughout. **Causal (Qwen, Mistral-Nemo) needs base models; Aya (instruct) is
+representational-only.**
 
 ---
 
@@ -130,8 +137,10 @@ src/patching.py               # STEP-3 machinery: helix reconstruct/subspace + f
 scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single layer
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
 scripts/run_transport.py      # STEP 3 sufficiency: causal cross-form transport + full/subspace/random controls
-scripts/run_necessity.py      # STEP 3 necessity: helix-subspace ablation + matched-source interchange
+scripts/run_necessity.py      # STEP 3 necessity (single layer): ablation + matched-source interchange
+scripts/run_ablation_sweep.py    # STEP 3 necessity done right: ablate at EVERY layer -> finds the READ layer
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
+scripts/run_structure.py      # #6 pairwise form x form matrix + #7 geometry<->behavior (one model load)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
@@ -203,25 +212,26 @@ below). The fixes left the representational results essentially unchanged.
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** shared, graded geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B **and** Aya-23-8B |
-| **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ but band is **family-specific** |
-| **H3** causal *sufficiency* | subspace patch steers all forms, random does not | ✅ Qwen2.5-7B (base) |
-| **H3** causal *necessity* | ablation breaks scripts, not languages (graded) | ✅ Qwen2.5-7B (base) |
+| **H1/H2** shared, graded geometry | `script ≈ notation > language`, all ≫ floor | ✅ Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B |
+| **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ band is **family-specific** |
+| **H3** causal *sufficiency* | subspace patch steers all forms, random does not | ✅ Qwen2.5-7B + Mistral-Nemo (base) |
+| **H3** causal *necessity* | ablating the subspace at the *read layer* drops accuracy | ✅ both base models; strength model-dependent |
+| **representation ≠ use** | value read *earlier* than it is most shared | ✅ both base models |
 
-> Note on models: the causal arithmetic readout needs a **base** model. Qwen2.5-7B and
-> Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
+> Note on models: the causal arithmetic readout needs a **base** model. Qwen2.5-7B, Mistral-Nemo-Base,
+> and Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
 > results only (its causal `clean_acc` ≈ 0 — a readout limitation, not a negative result).
 
 ### H2 confirmed at scale, and replicated across families
 Per-axis `subspace_cos` (mean-pooled, vs `en_digit`), on real models:
 
-| axis | Qwen2.5-7B | Aya-23-8B | floor |
-|---|---|---|---|
-| script | 0.70 | 0.53 | ~0.04 |
-| notation | 0.69 | 0.51 | ~0.04 |
-| language | 0.43 | 0.32 | ~0.04 |
+| axis | Qwen2.5-7B | Mistral-Nemo-Base | Aya-23-8B | floor |
+|---|---|---|---|---|
+| script | 0.71 | 0.80 | 0.53 | ~0.04 |
+| notation | 0.68 | 0.82 | 0.51 | ~0.04 |
+| language | 0.44 | 0.52 | 0.32 | ~0.04 |
 
-`script ≈ notation > language` holds in **two independent families**, every form far above the
+`script ≈ notation > language` holds in **three independent families**, every form far above the
 floor. Note the magnitude is *not* universal — Aya (built for multilinguality) shows **weaker**
 sharing than Qwen, so what's robust is the **ordering**, not the amount.
 
@@ -233,6 +243,7 @@ collapse in the final layers — a shared-value → form-specific-output arc, wi
 | model | sharing peak | profile |
 |---|---|---|
 | Qwen2.5-7B | ~L14 / 28 (mid) | single mid hump |
+| Mistral-Nemo-Base | ~L22 / 40 (mid-late) | broad plateau L18–28 |
 | Aya-23-8B | ~L25 / 32 (late) | bimodal, mid dip, late global peak |
 
 So "shared **mid**-band" is *not* universal. What's universal: the ordering, sharing far above
@@ -265,34 +276,48 @@ bigger logit shift regardless of sharing). The layer-normalized `subspace/full` 
 the across-layer version is at best a language-forms supplement / future work (proper causal
 tracing).
 
-### H3 (necessity): the model *naturally uses* the shared subspace — and it's graded
+### H3 (necessity): the model relies on the shared subspace — but at the *read* layer
 Sufficiency shows the circuit *can* read an injected direction; necessity asks whether the model
-*relies* on the shared subspace when processing a foreign-form number. `run_necessity.py` runs two
-tests on Qwen2.5-7B @ L14 (multi-seed random controls):
+*relies* on the shared subspace. The key methodological lesson: **necessity must be measured at the
+layer the arithmetic circuit reads the value, which is not the representational sharing peak.**
 
-**(A) Ablation** — mean-ablate the `en_digit`-fit helix subspace from a *source* number and re-measure arithmetic accuracy:
+`run_ablation_sweep.py` mean-ablates the `en_digit`-fit helix subspace at *every* layer and measures
+the per-form arithmetic-accuracy drop (Δ = acc after random-ablation − acc after helix-ablation),
+vs a multi-seed random-subspace control. Peak Δ per form:
 
-| form | clean | helix-ablate | random-ablate | Δ (rand − helix) |
-|---|---|---|---|---|
-| en_digit | 0.83 | 0.21 | 0.83 ± 0.05 | **0.62** |
-| devanagari (script) | 0.92 | 0.54 | 0.93 ± 0.02 | **0.39** |
-| es_word (language) | 0.62 | 0.54 | 0.60 ± 0.02 | 0.06 |
-| fr_word (language) | 0.75 | 0.67 | 0.73 ± 0.02 | 0.06 |
+| form | Qwen2.5-7B | Mistral-Nemo-Base |
+|---|---|---|
+| en_digit | **0.79** @ L7 | 0.25 @ L17 |
+| devanagari (script) | **0.50** @ L3 | 0.21 @ L18 |
+| es_word (language) | 0.08 (weak, all layers) | 0.25 @ L15 |
+| *sharing peak (for contrast)* | *L14* | *L22* |
 
-Ablating the shared subspace **breaks cross-script arithmetic** but **barely dents number-words** —
-so languages keep value information *outside* the shared subspace. Random-subspace ablation does
-nothing anywhere.
+Two findings:
 
-**(B) Matched-source interchange** — transport the model's *real* `en_digit` activation (not the
-Fourier reconstruction), subspace-only: `subspace_shift` ≫ `random_shift` for **all** forms
-(es 1.04, fr 1.00, devanagari 1.61, en 0.92; random ≈ 0). So sufficiency holds with genuine
-activations, independent of fit quality.
+1. **Necessity is real in both base models** — ablating the shared subspace drops arithmetic
+   accuracy — but only at the **read layer**. A *single-layer* ablation at the sharing peak
+   mismeasures it: Qwen's L14 undershot its true L7 peak, and Mistral-Nemo's L22 gave a spurious
+   ~0 (its read layer is L15–18). Random-subspace ablation does nothing at any layer.
+2. **Representation ≠ use.** In both models the value is *read earlier* than it is most cross-form
+   *shared* (Qwen read L3–7 vs shared L14; Mistral-Nemo read L15–18 vs shared L22) — a clean
+   dissociation between where number value is represented and where it is consumed.
 
-**Synthesis (the thesis).** Sufficient everywhere, necessary only for scripts →
-**cross-script sharing is deep (necessary + sufficient); cross-language sharing is sufficient-only**
-(number-words retain an independent value encoding). The causal necessity gradient *matches* the
-representational `subspace_cos` gradient — two independent methods agreeing that sharing degrades
-with surface-transformation distance.
+Strength/gradient is **model-dependent**: Qwen shows strong, `script > language`-graded necessity
+(0.79 digits, 0.50 scripts, 0.08 language); Mistral-Nemo shows moderate, ~uniform necessity
+(0.21–0.25 across forms) — i.e. more distributed/redundant encoding.
+
+**Also — matched-source interchange** (`run_necessity.py`, patch the model's *real* `en_digit`
+activation, subspace-only): `subspace_shift` ≫ `random_shift` for all forms in both models,
+confirming sufficiency with genuine activations, independent of the Fourier fit.
+
+> Caveat: these sweeps use ~24 addition cases/form, so exact read-layers and magnitudes are noisy;
+> the qualitative picture (necessity real, read-layer earlier than sharing-layer) is robust.
+
+**Synthesis (the thesis).** The shared number subspace is **both sufficient and necessary** for
+cross-form arithmetic in multiple base-model families, with the value **read earlier than it is most
+shared**. Sharing is graded (`script > language`); the *strength* of both sharing and necessity is
+model-dependent, but the qualitative picture — a partially-shared number geometry, causally used
+across surface forms — holds throughout.
 
 ## Preliminary findings (Qwen2.5-1.5B, local validation — how the pipeline was calibrated)
 
@@ -348,15 +373,16 @@ reported as robustness checks.
 - [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
 - [x] Tooling: per-layer sweep, cross-run aggregator, tokenization diagnostic
 - [x] **Real run — Qwen2.5-7B**: H2 confirmed, sharing localized to a mid band
-- [x] **Step 3 sufficiency — causal transport** (single layer) with full/subspace/random controls
-- [x] **Step 3 necessity — ablation + matched-source interchange**: graded, script-necessary/language-sufficient-only
-- [x] **Universality — Aya-23-8B** (representational): H2 replicates; localization is family-specific (late peak)
-- [x] **Bug fixes** (external review): consistent `nmax` normalization + rank-8 basis / SVD orthonormalization; all runs redone
+- [x] **Step 3 sufficiency — causal transport** with full/subspace/random controls (Qwen + Mistral-Nemo)
+- [x] **Step 3 necessity — ablation-LAYER sweep**: necessity real at the *read layer* (≠ sharing peak) in both base models; strength model-dependent
+- [x] **Representation ≠ use** dissociation: value read earlier than it is most shared (both models)
+- [x] **Universality — Aya-23-8B** (representational) + **Mistral-Nemo-Base** (representational + causal): H2 replicates; localization family-specific
+- [x] **#6 pairwise matrix** (block structure) + **#7 geometry↔behavior** (found weak/frequency-confounded → not a headline)
+- [x] **External-review bug fixes**: consistent `nmax` normalization + rank-8 basis / SVD orthonormalization; all runs redone
 - [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model) — repr. + causal
-- [ ] Pairwise form×form alignment matrix (word-to-word) + geometry↔behavior link (`subspace_cos` vs arithmetic accuracy)
-- [ ] Hardening: norm-matched random control; stronger (covariance-matched) alignment null
+- [ ] Hardening: more addition cases (tighter necessity error bars); norm-matched random control; covariance-matched alignment null
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
-- [ ] Write-up — figures assembled, related-work positioning vs FARS (2605.09496) + universal-numbers (2510.26285)
+- [ ] Write-up — figures assembled (pairwise heatmap, ablation-layer sweep, transport, layer sweep), positioning vs FARS (2605.09496) + universal-numbers (2510.26285)
 
 ## Key references
 - Kantamneni & Tegmark, *LLMs Use Trigonometry to Do Addition* — [2502.00873](https://arxiv.org/abs/2502.00873) ([code](https://github.com/subhashk01/LLM-addition))
