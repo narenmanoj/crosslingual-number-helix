@@ -16,10 +16,16 @@ import numpy as np
 from scipy.linalg import subspace_angles
 
 
-def orthonormal_basis(dirs: np.ndarray) -> np.ndarray:
-    """dirs: [r, d_model] rows span an r-dim subspace -> [d_model, r] orthonormal columns."""
-    Q, _ = np.linalg.qr(dirs.T)
-    return Q[:, : dirs.shape[0]]
+def orthonormal_basis(dirs: np.ndarray, tol: float = 1e-8) -> np.ndarray:
+    """dirs: [r, d_model] rows span a subspace -> [d_model, rank] orthonormal columns.
+
+    Rank-revealing SVD (not QR): drops near-degenerate directions so a rank-deficient `dirs`
+    (e.g. a dead Fourier column) doesn't contribute an arbitrary numerical axis to the subspace."""
+    U, S, _ = np.linalg.svd(dirs.T, full_matrices=False)   # U: [d_model, min(d_model, r)]
+    if S.size == 0 or S[0] == 0:
+        return U[:, :0]
+    keep = S > tol * S[0]
+    return U[:, keep]
 
 
 def subspace_alignment(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:

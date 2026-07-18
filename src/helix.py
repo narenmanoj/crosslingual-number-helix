@@ -15,15 +15,27 @@ from sklearn.decomposition import PCA
 DEFAULT_PERIODS = (2, 5, 10, 100)
 
 
-def fourier_basis(numbers, periods=DEFAULT_PERIODS, include_linear=True) -> np.ndarray:
+def fourier_basis(numbers, periods=DEFAULT_PERIODS, include_linear=True, nmax=None) -> np.ndarray:
+    """Fourier feature basis for integers.
+
+    nmax: normalization for the linear term. MUST be passed (from the fit) when reconstructing on
+    a different range than the fit, else the linear component is mis-scaled (e.g. fit 0-99 nmax=99
+    vs reconstruct 0-9 nmax=9 -> 11x too large). Defaults to numbers.max() only for a fresh fit.
+
+    The sin term at period 2 (and 1) is identically zero for integer inputs (sin(pi*n)=0), so it is
+    dropped -- otherwise it is a dead column that makes the basis rank-deficient and injects an
+    arbitrary direction into the orthonormalized helix subspace. cos at period 2 = (-1)^n is kept.
+    """
     nums = np.asarray(numbers, dtype=float)
-    nmax = max(nums.max(), 1.0)
+    if nmax is None:
+        nmax = max(nums.max(), 1.0)
     feats = []
     if include_linear:
         feats.append(nums / nmax)
     for T in periods:
         feats.append(np.cos(2 * np.pi * nums / T))
-        feats.append(np.sin(2 * np.pi * nums / T))
+        if T not in (1, 2):  # sin(2*pi*n/T) == 0 for all integer n when T divides 2
+            feats.append(np.sin(2 * np.pi * nums / T))
     return np.stack(feats, axis=1)  # [n, d_fourier]
 
 
@@ -31,10 +43,11 @@ def fit_helix(H: np.ndarray, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20) 
     """H: [n, d_model] activations (rows aligned to `numbers`)."""
     H = np.asarray(H, dtype=float)
     n = H.shape[0]
+    nmax = max(float(np.asarray(numbers, dtype=float).max()), 1.0)
     k = min(k_pca, n - 1, H.shape[1])
     pca = PCA(n_components=k)
     Z = pca.fit_transform(H)  # [n, k]
-    B = fourier_basis(numbers, periods)  # [n, d_fourier]
+    B = fourier_basis(numbers, periods, nmax=nmax)  # [n, d_fourier]
 
     # least-squares: Z ~ B  =>  W [d_fourier, k]
     W, *_ = np.linalg.lstsq(B, Z, rcond=None)
@@ -54,6 +67,7 @@ def fit_helix(H: np.ndarray, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20) 
         "helix_dirs_model": helix_dirs_model,
         "mean": H.mean(0),
         "periods": periods,
+        "nmax": nmax,
     }
 
 

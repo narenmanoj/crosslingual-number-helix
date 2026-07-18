@@ -47,12 +47,15 @@ def patch_residual(model, layer_idx: int, position: int, new_vector: torch.Tenso
 
 # --- helix geometry helpers (operate on a fit_helix(...) result dict) ---
 
-def helix_reconstruct(fit: dict, values, periods=DEFAULT_PERIODS) -> np.ndarray:
+def helix_reconstruct(fit: dict, values) -> np.ndarray:
     """Model-space vector the form's helix predicts for each value. [len(values), d_model].
-    h_hat(n) = mean + (B(n) @ W) @ PCA.components_   (see helix.fit_helix)."""
-    B = fourier_basis(values, periods)         # [m, d_fourier]
-    Z = B @ fit["W"]                           # [m, k] (PCA space)
-    return fit["mean"] + Z @ fit["pca"].components_   # [m, d_model]
+    h_hat(n) = mean + (B(n) @ W) @ PCA.components_   (see helix.fit_helix).
+
+    Reuses the fit's stored nmax + periods so the linear term is normalized consistently with the
+    fit (critical when reconstructing on a narrower range than the fit -- see fourier_basis)."""
+    B = fourier_basis(values, fit["periods"], nmax=fit["nmax"])   # [m, d_fourier]
+    Z = B @ fit["W"]                                              # [m, k] (PCA space)
+    return fit["mean"] + Z @ fit["pca"].components_               # [m, d_model]
 
 
 def helix_subspace_basis(fit: dict) -> np.ndarray:
