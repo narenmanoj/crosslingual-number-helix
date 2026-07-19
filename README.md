@@ -87,27 +87,45 @@ model's arithmetic behave as if it had seen the transported value?
 > **H1 (shared geometry).** Across surface forms, the number helix occupies the *same
 > directions* in the residual stream — so the subspaces align far above a random-subspace floor.
 >
-> **H2 (value- not token-driven).** Forms that differ only in *script* (`37` vs `३७`) share the
-> geometry more than forms that differ in *language* (`thirty-seven` vs `treinta y siete`),
-> because sharing tracks the underlying value rather than the tokens.
+> **H2 (graded invariance).** Cross-form compatibility is greatest under glyph-only changes
+> (`37`↔`३७`), intermediate under digit→word changes (`37`↔`thirty-seven`), and weaker under
+> language changes (`thirty-seven`↔`treinta y siete`). *This states what is measured — a gradient
+> of surface-form invariance — without claiming the mechanism is "value not token": script variants
+> also share positional-decimal notation, digit-wise composition, and an English carrier.*
 >
-> **H3 (causal transport).** A number written in form B can be activation-patched onto the
-> form-A helix and shift the model's downstream arithmetic toward that value — using only the
-> A-helix subspace, surviving the controls below.
+> **H3 (causal transport & reliance).** A number written in form B can be activation-patched onto
+> the form-A helix and shift the model's downstream arithmetic toward that value (sufficiency), and
+> ablating the shared subspace can disrupt arithmetic in form B (necessity) — both against matched
+> controls. High subspace overlap makes transport *geometrically plausible*; the causal test is what
+> shows the downstream computation actually interprets the transported coordinates.
 
 Any clear outcome is a paper. **Even a clean negative** — "the helix is *not* shared across
 forms, and here's the tokenization-controlled evidence" — is publishable if pre-registered,
 because it contradicts the implicit universality assumption in the number-geometry literature.
 
-## What's novel (the gap, verified against the literature)
+## What's novel (narrow, and stated carefully)
 
-- Number-geometry papers are **monolingual English digits** — no languages, scripts, or words
-  ([2502.00873](https://arxiv.org/abs/2502.00873), [2510.26285](https://arxiv.org/abs/2510.26285)).
-- The cross-lingual concept-patching method exists but was applied **only to concrete nouns,
-  never numbers** ([Separating Tongue from Thought, 2411.08745](https://arxiv.org/abs/2411.08745)).
-- Scripts/formats numeracy work is **behavioral only** — it measures accuracy, never the
-  internal geometry ([2601.15251](https://arxiv.org/abs/2601.15251),
-  [2505.16088](https://arxiv.org/abs/2505.16088)).
+Prior work already establishes a lot of the neighborhood — the novelty is a *specific combination*,
+not a fundamentally new phenomenon or method:
+
+- **Helix / Fourier number geometry** is established ([2502.00873](https://arxiv.org/abs/2502.00873),
+  [2405.14860](https://arxiv.org/abs/2405.14860)); some work also *observes* similar helix spectra
+  across numeral systems, and universality *across models* ([2510.26285](https://arxiv.org/abs/2510.26285)).
+- **Shared circuitry between Arabic numerals and number words** (and cross-language effects) has been
+  studied; **cross-format / cross-lingual activation patching** exists (FARS
+  [2605.09496](https://arxiv.org/abs/2605.09496) for reasoning concepts; *Separating Tongue from
+  Thought* [2411.08745](https://arxiv.org/abs/2411.08745) for concept nouns).
+
+**What remains unresolved — our contribution:** whether these forms occupy the *same Fourier-structured
+residual-stream coordinates* (literal subspace overlap), whether those coordinates support *direct
+cross-form arithmetic transport* (natural-activation interchange, not just a reconstruction), whether
+models *naturally rely* on them (necessity, not only sufficiency), and how this varies by architecture
+— including **non-Latin numeral scripts**. That package is not trivially implied by the prior work
+above.
+
+> ⚠️ *Related-work TODO:* verify and cite the recent cross-numeral-system helix-spectra work and the
+> numeral↔number-word shared-circuit work (flagged in review) before submission; the framing above is
+> written to be correct regardless, but the citations must be pinned down.
 
 The contribution is to connect these: take the *causally-validated helix* and the
 *causally-validated cross-lingual transport method* and answer the question both literatures
@@ -137,25 +155,27 @@ scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single la
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
 scripts/run_transport.py      # STEP 3 sufficiency: causal cross-form transport + full/subspace/random controls
 scripts/run_necessity.py      # STEP 3 necessity (single layer): ablation + matched-source interchange
-scripts/run_ablation_sweep.py    # STEP 3 necessity done right: ablate at EVERY layer -> finds the READ layer
+scripts/run_ablation_sweep.py    # necessity vs layer: helix-ablation Δ per layer (exploratory; NOT a read-layer)
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/run_structure.py      # #6 pairwise form x form matrix + #7 geometry<->behavior (one model load)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
 
-**Three axes of variation** (`src/data.py`), ordered by how directly they test a
-*value-driven* shared helix. All forms render the *same integer set in the same order*, so
-activation rows are paired across forms (this is what makes the comparisons valid):
+**Three axes of variation** (`src/data.py`), ordered by increasing surface-form distance. All forms
+render the *same integer set in the same order*, so activation rows are paired across forms (this is
+what makes the comparisons valid):
 - **Script axis — HEADLINE** (same language + notation, only glyphs change):
   `en_digit` `37` vs `devanagari_digit` `३७` vs `arabic_indic_digit` `٣٧` vs `fullwidth_digit` `３７`.
-  A shared helix here is near-pure evidence of value-driven geometry, and it's the
-  least-covered contribution vs prior work (FARS 2605.09496 used Latin-script prose only).
+  The least-covered contribution vs prior work (esp. non-Latin numeral scripts). *Note: high sharing
+  here shows glyph-invariance; it doesn't by itself isolate "value" from shared positional-decimal
+  notation.*
 - **Notation axis** (digits vs spelled-out words, language fixed): `en_digit` vs `en_word`.
 - **Language axis** (spelled-out words, language varies): `en_word`, `es_word`, `fr_word`, `de_word`.
 
-**H2 prediction:** if sharing is value-driven, per-axis alignment should fall
-`script ≥ notation ≥ language`. `run_fit_and_align.py` prints this per-axis summary directly.
+**H2 prediction (graded invariance):** compatibility should fall `script ≥ notation ≥ language`.
+`run_fit_and_align.py` prints this per-axis summary; `run_structure.py` reports the *clean* contrasts
+(correct reference per axis) + the full pairwise matrix, which is the primary object.
 
 ### Setup
 
@@ -187,8 +207,10 @@ to ~0), then (3) reports three alignment metrics vs the `en_digit` reference aga
 
 ### The three metrics (validated on synthetic ground-truth cases)
 - **`subspace_cos`** — principal-angle cosine between the two helix subspaces. **The primary,
-  transport-relevant metric**: high (≫ floor) ⇒ same *literal directions* ⇒ a direct activation
-  patch can carry a number from one form to the other (tests **H1**).
+  transport-relevant metric**: high (≫ floor) ⇒ the forms occupy overlapping directions, which makes
+  direct transport *geometrically plausible* (tests **H1**). It does **not** guarantee transport —
+  forms could share a subspace but differ in rotation/scale/offset within it, or be decoded
+  differently downstream; that's what the H3 causal test settles.
 - **`procrustes_cv`** — held-out R² of the best rotation aligning the two helices.
   *Necessary-not-sufficient*: high for essentially any two competent number encoders; it only
   collapses when a form has no number geometry at all (or tokenization destroyed it).
@@ -197,11 +219,12 @@ to ~0), then (3) reports three alignment metrics vs the `en_digit` reference aga
 ### Reading the result — this is the whole point
 | `subspace_cos` | `procrustes_cv` | conclusion |
 |---|---|---|
-| ≫ floor | high | **same directions** → H1 holds → direct patch works → build step 3 |
-| ~floor | high | same shape, **different directions** → transport needs a learned align-map (weaker positive) |
+| ≫ floor | high | overlapping directions → transport is *geometrically plausible* → test it causally (step 3) |
+| ~floor | high | same shape, **different directions** → transport would need a learned align-map (weaker) |
 | ~floor | low | **no shared geometry** for that form → check tokenization confound, else publishable negative |
 
-If **script-axis forms align more than language-axis forms**, that's direct evidence for **H2**.
+Script-axis forms aligning more than language-axis forms is evidence for **graded invariance (H2)** —
+not, by itself, for a "value-not-token" mechanism (see the H2 note above).
 
 ## Results so far
 
@@ -220,7 +243,23 @@ below). The fixes left the representational results essentially unchanged.
 > and Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
 > results only (its causal `clean_acc` ≈ 0 — a readout limitation, not a negative result).
 
-### H2 confirmed at scale, across families — with clean contrasts
+### Evidence status (claim-by-claim — the scoped view)
+
+| claim | status |
+|---|---|
+| Fourier number geometry appears across the tested forms | **supported** |
+| Helix subspaces align above an isotropic random floor | **supported** |
+| `script ≈ notation > language` (clean word-to-word contrasts) | **replicated** (3 families) |
+| Cross-form helix intervention steers restricted digit-choice logits | **supported** |
+| Steering survives **isotropic + norm-matched** controls | **supported**; covariance/sensitivity-matched interchange controls **pending** |
+| The shared subspace is *naturally necessary* (whole-span, matched nulls) | **model/form-dependent**: Qwen broad; Mistral English-digits; some number-words still modest |
+| Ablation Δ peaks earlier than alignment | **observed descriptively** (confounded — see Limitations) |
+| Value is *read* earlier than it is shared | **not established** |
+| Geometry explains behavioral numeracy gaps | **not supported** (weak, frequency-confounded) |
+
+The rest of this section elaborates each row; all headings/claims below are scoped to match it.
+
+### H2 (graded invariance) replicated across families — with clean contrasts
 Per-axis `subspace_cos` using the **correct reference per axis** (script: en_digit↔digit-scripts;
 notation: en_digit↔en_word; language: **en_word↔foreign words**, not en_digit↔words — see
 `run_structure.py`). This fixes a reference-form confound: comparing en_digit to foreign *words*
@@ -240,8 +279,9 @@ table suggests — number-words form their own moderately-shared cluster (e.g. Q
 
 ### Mechanistic: sharing is localized, but the band is family-specific
 The layer sweep (`run_layer_sweep.py`) shows cross-form `subspace_cos` rise, plateau, then
-collapse in the final layers — a shared-value → form-specific-output arc, with H2 holding at
-*every* layer. **But where it peaks moves with the model:**
+collapse in the final layers — *consistent with* later form-specific specialization (though the
+sweep doesn't identify the cause of the decline; it could also reflect helix-fit-quality or
+anisotropy changes). H2 holds at *every* layer. **Where it peaks moves with the model:**
 
 | model | sharing peak | profile |
 |---|---|---|
@@ -267,12 +307,16 @@ random control:
 | devanagari (cross-script) | +1.79 | +0.01 | ~224× |
 
 Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
-words and Devanagari digits — **the model reads the shared helix regardless of surface form** —
-while an equal-dimension random subspace does essentially nothing. Crucially, this holds against a
-**norm-matched** random control (`run_necessity.py` interchange: subspace_shift ≫ matched_random,
-e.g. Qwen es_word 1.36 vs 0.06, devanagari 1.54 vs 0.08) — so the effect is the *specific helix
-directions*, not just "a large enough perturbation." That is what makes the illusion control
-meaningful. Replicated on Mistral-Nemo (weaker magnitudes, same pattern).
+words and Devanagari digits — **the shared subspace is sufficient to drive the answer regardless of
+surface form** — while an equal-dimension random subspace does essentially nothing. This holds
+against a **norm-matched** random control (`run_necessity.py` interchange: subspace_shift ≫
+matched_random, e.g. Qwen es_word 1.36 vs 0.06, devanagari 1.54 vs 0.08) — so the effect is the
+*specific helix directions*, not just "a large enough perturbation." Replicated on Mistral-Nemo
+(weaker magnitudes, same pattern).
+
+> Scope: this passes **isotropic** and **norm-matched** random controls. It does *not* fully settle
+> the Makelov concern (a selected subspace can act through a parallel pathway) — that needs
+> covariance/sensitivity-matched interchange controls (☐ pending) plus the necessity evidence below.
 
 **Caveat — across-layer causal localization is deliberately *not* a headline.** Raw transport
 magnitude isn't comparable across layers (an earlier intervention propagates through more layers →
@@ -338,10 +382,10 @@ the quantitative story needs the 7B+ cluster runs.
   floor is 0.064. The helix is real and the metrics are calibrated.
 - **H2 ordering already visible.** Per-axis `subspace_cos`: script ≈ notation **>** language,
   with every form far above the 0.064 floor (sharing is *graded*, not present/absent).
-- **Sharing lives in a mid-network band, then re-specializes** (`run_layer_sweep.py`): cross-form
+- **Sharing lives in a mid-network band, then declines** (`run_layer_sweep.py`): cross-form
   `subspace_cos` rises through early layers, plateaus ~L5–20 (peak L12), then collapses toward the
-  floor in the final ~5 layers — a shared-value → form-specific-output arc. H2 holds at *every*
-  layer (the axis curves never cross). Site the step-3 causal transport in the mid band (~L5–13).
+  floor in the final ~5 layers (consistent with later specialization; cause not identified). H2
+  holds at *every* layer. Site the step-3 causal transport in the mid band (~L5–13).
 
 ### Tokenizer confound — checked, and it is NOT the explanation
 The number occupies very different token counts per form (≈1.9 for digits, 3.8–4.4 for
@@ -366,8 +410,9 @@ reported as robustness checks.
 ## Known threats (design around these, don't discover them in review)
 1. **Interpretability illusion** ([Makelov et al., 2311.17030](https://arxiv.org/abs/2311.17030)):
    a subspace patch can change behavior via a *dormant parallel pathway* even if it isn't the
-   model's real mechanism. The step-3 controls in `src/patching.py` exist for exactly this — a
-   successful transport is necessary but not sufficient.
+   model's real mechanism. The step-3 controls in `src/patching.py` (isotropic + norm-matched +
+   covariance-matched + shuffled-Fourier) *mitigate* this — but isotropic controls alone don't settle
+   it; covariance/sensitivity-matched *interchange* controls are still pending. Necessity helps.
 2. **Tokenization confounds** — *checked (see Preliminary findings)*: `37` vs `thirty-seven` vs
    `३७` follow different token paths and BPE shreds multi-digit strings. Verified the H2 result
    is robust to the readout via `--pooling {last,mean,prompt_last}`; `mean`-over-span is primary.
@@ -407,7 +452,7 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - [x] Local validation on Qwen2.5-1.5B: controls calibrated, H2 ordering visible
 - [x] Tokenizer-confound check: language drop robust across `last`/`mean`/`prompt_last`; primary readout pinned to `mean`
 - [x] Tooling: per-layer sweep, cross-run aggregator, tokenization diagnostic
-- [x] **Real run — Qwen2.5-7B**: H2 confirmed, sharing localized to a mid band
+- [x] **Real run — Qwen2.5-7B**: H2 (graded invariance) replicated, sharing localized to a mid band
 - [x] **Step 3 sufficiency — causal transport** + **norm-matched** control (Qwen + Mistral-Nemo)
 - [x] **Step 3 necessity — whole-span ablation vs matched nulls** (cov-matched + shuffled-Fourier): model-dependent (Qwen broad, Mistral English-digits)
 - [x] **Universality — Aya-23-8B** (representational) + **Mistral-Nemo-Base** (representational + causal): H2 replicates; localization family-specific
