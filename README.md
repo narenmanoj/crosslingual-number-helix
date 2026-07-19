@@ -87,11 +87,14 @@ model's arithmetic behave as if it had seen the transported value?
 > **H1 (shared geometry).** Across surface forms, the number helix occupies the *same
 > directions* in the residual stream — so the subspaces align far above a random-subspace floor.
 >
-> **H2 (graded invariance).** Cross-form compatibility is greatest under glyph-only changes
-> (`37`↔`३७`), intermediate under digit→word changes (`37`↔`thirty-seven`), and weaker under
-> language changes (`thirty-seven`↔`treinta y siete`). *This states what is measured — a gradient
-> of surface-form invariance — without claiming the mechanism is "value not token": script variants
-> also share positional-decimal notation, digit-wise composition, and an English carrier.*
+> **H2 (graded coordinate invariance).** Shared Fourier coordinates survive glyph-only changes
+> (`37`↔`३७`) more completely than digit→word changes (`37`↔`thirty-seven`), which survive more than
+> language changes (`thirty-seven`↔`treinta y siete`). *This is a statement about the geometry, not
+> the mechanism.* High alignment across decimal digit-scripts need not mean an abstract "value" code:
+> all four digit-scripts share the **same positional-decimal composition rule**, so the overlap could
+> equally reflect a shared **glyph-normalization / digit-parsing** stage. Whether it is abstract
+> value, common decimal parsing, or a shared digit-normalization stage is an *interpretation left to
+> test* — H2 claims only the graded invariance.
 >
 > **H3 (causal transport & reliance).** A number written in form B can be activation-patched onto
 > the form-A helix and shift the model's downstream arithmetic toward that value (sufficiency), and
@@ -465,6 +468,10 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
   curves) are now committed (`.gitignore` keeps only large figures/caches out).
 - ☐ **Statistical power.** ~24–40 cases/form; report bootstrap CIs and expand the case set before
   final figures.
+- ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
+  blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
+  accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
+  since this space moves monthly.
 
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form
@@ -488,7 +495,7 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - Kantamneni & Tegmark, *LLMs Use Trigonometry to Do Addition* — [2502.00873](https://arxiv.org/abs/2502.00873) ([code](https://github.com/subhashk01/LLM-addition))
 - Engels et al., *Not All Features Are One-Dimensionally Linear* — [2405.14860](https://arxiv.org/abs/2405.14860)
 - Gurnee & Tegmark, *LMs Represent Space and Time* — [2310.02207](https://arxiv.org/abs/2310.02207)
-- *Separating Tongue from Thought* (cross-lingual concept patching) — [2411.08745](https://arxiv.org/abs/2411.08745)
+- *Separating Tongue from Thought* (cross-lingual patching of language-agnostic **lexical** concepts — separable concept/language info; not numerical-value Fourier geometry) — [2411.08745](https://arxiv.org/abs/2411.08745)
 - *Effect of Scripts and Formats on LLM Numeracy* (behavioral only) — [2601.15251](https://arxiv.org/abs/2601.15251)
 - *Language Models Learn Universal Representations of Numbers* (universal across **models**, not forms) — [2510.26285](https://arxiv.org/abs/2510.26285)
 - **FARS — Format-Agnostic Reasoning Subspaces** (closest *method*: PCA-subspace + patching + ablation + cross-arch; reasoning concepts, not the helix/numbers) — [2605.09496](https://arxiv.org/abs/2605.09496)
