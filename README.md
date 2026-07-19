@@ -103,29 +103,48 @@ Any clear outcome is a paper. **Even a clean negative** — "the helix is *not* 
 forms, and here's the tokenization-controlled evidence" — is publishable if pre-registered,
 because it contradicts the implicit universality assumption in the number-geometry literature.
 
-## What's novel (narrow, and stated carefully)
+## What's novel (narrow, and honestly bounded)
 
-Prior work already establishes a lot of the neighborhood — the novelty is a *specific combination*,
-not a fundamentally new phenomenon or method:
+This is a **specific-combination** contribution, not a new phenomenon or a new method. The
+neighborhood is well-populated (all citations below verified 2026-07-18):
 
-- **Helix / Fourier number geometry** is established ([2502.00873](https://arxiv.org/abs/2502.00873),
-  [2405.14860](https://arxiv.org/abs/2405.14860)); some work also *observes* similar helix spectra
-  across numeral systems, and universality *across models* ([2510.26285](https://arxiv.org/abs/2510.26285)).
-- **Shared circuitry between Arabic numerals and number words** (and cross-language effects) has been
-  studied; **cross-format / cross-lingual activation patching** exists (FARS
-  [2605.09496](https://arxiv.org/abs/2605.09496) for reasoning concepts; *Separating Tongue from
-  Thought* [2411.08745](https://arxiv.org/abs/2411.08745) for concept nouns).
+- **The helix substrate.** Numbers occupy a Fourier/helix code, causally used for addition
+  (Kantamneni & Tegmark, [2502.00873](https://arxiv.org/abs/2502.00873)) — but **digit-only, English**.
+  This is what we test the cross-form invariance *of*.
+- **Cross-script helix *shape* is already observed — descriptively.** A June 2026 analysis (Gupta,
+  *[From Latin Digits to Babylonian Cuneiform](https://girishgupta.com/beyond-the-parrot/20260618-from-latin-digits-to-babylonian-cuneiform)*)
+  fits the helix across **10 numeral systems × 8 models** and reports glyph-invariant, value-driven,
+  base-retuning helices — but **passively**: no arithmetic, no causal test, **no shared-subspace-overlap
+  metric** (coincident *independent* per-script fits, not measured alignment), and no spelled-out
+  number-words. → This pre-empts our cross-script *descriptive* claim; we do **not** headline it.
+- **Digits and number-words share machinery — at the circuit level.** Lan, Torr & Barez
+  ([2311.04131](https://arxiv.org/abs/2311.04131), EMNLP 2024) show shared *circuits* (heads) across
+  numerals / number-words / months, causally necessary via ablation, incl. **English/Spanish** and
+  addition/subtraction — but **head-level, Latin-script only, no helix/subspace geometry, no transport**.
+  Semantic Hub ([2411.04986](https://arxiv.org/abs/2411.04986)) shows "5+3"/"five plus three" share an
+  English-anchored space with causal steering — coarse, not helix-coordinate.
+- **Format-agnostic subspaces + patching + ablation are an established *method*.** FARS
+  ([2605.09496](https://arxiv.org/abs/2605.09496)) does PCA-subspace + activation patching + ablation +
+  cross-architecture CCA — but for **reasoning concepts across prose/code/math**, *not* numbers, *not*
+  the Fourier helix, *not* numeral scripts, *not* number-words. **This is our closest methodological
+  prior;** we differ in **object** (number values), **coordinate system** (the specific Fourier-helix
+  directions, not variance-PCA), and **forms** (scripts/notation/languages).
+- Number-code universality is established **across models** ([2510.26285](https://arxiv.org/abs/2510.26285),
+  [2604.20817](https://arxiv.org/abs/2604.20817)) — orthogonal to our **cross-form, within-model** question.
 
-**What remains unresolved — our contribution:** whether these forms occupy the *same Fourier-structured
-residual-stream coordinates* (literal subspace overlap), whether those coordinates support *direct
-cross-form arithmetic transport* (natural-activation interchange, not just a reconstruction), whether
-models *naturally rely* on them (necessity, not only sufficiency), and how this varies by architecture
-— including **non-Latin numeral scripts**. That package is not trivially implied by the prior work
-above.
+**Our defensible contribution** — the intersection none of the above occupies:
+> Do the *specific Fourier-helix number coordinates* **literally overlap** (principal-angle subspace
+> measurement) across **numeral scripts** (Devanagari / Arabic-Indic / fullwidth), **notation**
+> (digit↔word), and **language** (EN/ES/FR/DE number-words) *within a single model*; do those
+> coordinates support **causal cross-form arithmetic transport** (natural-activation interchange); are
+> they **naturally necessary** (matched-null ablation); and how does this vary **by architecture**?
 
-> ⚠️ *Related-work TODO:* verify and cite the recent cross-numeral-system helix-spectra work and the
-> numeral↔number-word shared-circuit work (flagged in review) before submission; the framing above is
-> written to be correct regardless, but the citations must be pinned down.
+Three load-bearing elements — drop any one and a prior paper covers us: **helix-coordinate /
+principal-angle** (else → FARS), **numeral-script** (else → Semantic Hub / script-invariance SAEs),
+**within-model cross-form** (else → the cross-model universality work). We position this as *the
+cross-form companion to the cross-model universality results, specialized to the K–T helix, with
+FARS-style causal methodology applied where FARS does not go* — and we pre-empt the reviewer's
+"isn't this FARS/Semantic Hub for numbers?" head-on.
 
 The contribution is to connect these: take the *causally-validated helix* and the
 *causally-validated cross-lingual transport method* and answer the question both literatures
@@ -165,11 +184,12 @@ scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling 
 **Three axes of variation** (`src/data.py`), ordered by increasing surface-form distance. All forms
 render the *same integer set in the same order*, so activation rows are paired across forms (this is
 what makes the comparisons valid):
-- **Script axis — HEADLINE** (same language + notation, only glyphs change):
+- **Script axis** (same language + notation, only glyphs change):
   `en_digit` `37` vs `devanagari_digit` `३७` vs `arabic_indic_digit` `٣٧` vs `fullwidth_digit` `３７`.
-  The least-covered contribution vs prior work (esp. non-Latin numeral scripts). *Note: high sharing
-  here shows glyph-invariance; it doesn't by itself isolate "value" from shared positional-decimal
-  notation.*
+  *Note: the cross-script helix **shape** was shown descriptively (and across more scripts) by Gupta
+  (2026); our contribution on this axis is the **measured subspace overlap** and the **causal**
+  (transport + necessity) test, not the descriptive observation. High sharing here shows
+  glyph-invariance; it doesn't by itself isolate "value" from shared positional-decimal notation.*
 - **Notation axis** (digits vs spelled-out words, language fixed): `en_digit` vs `en_word`.
 - **Language axis** (spelled-out words, language varies): `en_word`, `es_word`, `fr_word`, `de_word`.
 
@@ -469,7 +489,10 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - Engels et al., *Not All Features Are One-Dimensionally Linear* — [2405.14860](https://arxiv.org/abs/2405.14860)
 - Gurnee & Tegmark, *LMs Represent Space and Time* — [2310.02207](https://arxiv.org/abs/2310.02207)
 - *Separating Tongue from Thought* (cross-lingual concept patching) — [2411.08745](https://arxiv.org/abs/2411.08745)
-- *Effect of Scripts and Formats on LLM Numeracy* — [2601.15251](https://arxiv.org/abs/2601.15251)
-- *Language Models Learn Universal Representations of Numbers* (universal across models, disclaims cross-lingual) — [2510.26285](https://arxiv.org/abs/2510.26285)
-- *FARS — Format-Agnostic Reasoning Subspaces* (closest adjacent method; general concepts, not the helix) — [2605.09496](https://arxiv.org/abs/2605.09496)
+- *Effect of Scripts and Formats on LLM Numeracy* (behavioral only) — [2601.15251](https://arxiv.org/abs/2601.15251)
+- *Language Models Learn Universal Representations of Numbers* (universal across **models**, not forms) — [2510.26285](https://arxiv.org/abs/2510.26285)
+- **FARS — Format-Agnostic Reasoning Subspaces** (closest *method*: PCA-subspace + patching + ablation + cross-arch; reasoning concepts, not the helix/numbers) — [2605.09496](https://arxiv.org/abs/2605.09496)
+- **Gupta**, *From Latin Digits to Babylonian Cuneiform: Number Helices Across Scripts* (June 2026 blog; cross-script helix *shape*, descriptive, no causal) — [girishgupta.com](https://girishgupta.com/beyond-the-parrot/20260618-from-latin-digits-to-babylonian-cuneiform)
+- **Lan, Torr & Barez**, *Towards Interpretable Sequence Continuation: Analyzing Shared Circuits* (EMNLP 2024; shared **circuits** across numerals/words/months, EN/ES, via ablation) — [2311.04131](https://arxiv.org/abs/2311.04131)
+- *The Semantic Hub Hypothesis* (digit/word shared English-anchored space + steering) — [2411.04986](https://arxiv.org/abs/2411.04986)
 - Makelov et al., *An Interpretability Illusion for Subspace Activation Patching* — [2311.17030](https://arxiv.org/abs/2311.17030)
