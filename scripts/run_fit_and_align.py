@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations
+from src.extract import load_model, extract_form_activations, model_revision
 from src.helix import fit_helix, shuffled_control_r2
 from src.alignment import (
     subspace_alignment, linear_cka, random_subspace_floor, orthogonal_procrustes_cv,
@@ -156,7 +156,7 @@ def main():
 
     # --- save ---
     result = {
-        "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
+        "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model,
         "r2": r2s, "r2_shuffled": shuf, "random_subspace_floor": floor,
         "axis_summary": axis_summary,

@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
@@ -193,7 +193,7 @@ def main():
     png = os.path.join(args.out_dir, f"transport_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
+    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
            "curves": curves, "frac_subspace_over_full": frac,
            "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}
     js = os.path.join(args.out_dir, f"transport_sweep_{tag}.json")

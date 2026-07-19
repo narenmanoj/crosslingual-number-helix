@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations
+from src.extract import load_model, extract_form_activations, model_revision
 from src.helix import fit_helix
 from src.alignment import (
     subspace_alignment, linear_cka, random_subspace_floor, orthogonal_procrustes_cv,
@@ -148,7 +148,7 @@ def main():
     png = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model": args.model, "pooling": args.pooling, "reference": ref,
+    out = {"model_revision": model_revision(model, args.model), "model": args.model, "pooling": args.pooling, "reference": ref,
            "n_numbers": len(numbers), "d_model": d_model, "n_layers": n_layers,
            "random_subspace_floor": floor, "best_layer": best["layer"], "per_layer": per_layer}
     js = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.json")

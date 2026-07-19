@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
@@ -185,7 +185,7 @@ def main():
     print("en_digit (within-form) should be strongest. flip is a strict lower bound (helix R^2~0.5 =>")
     print("partial reconstruction -> shift moves the answer without always flipping the argmax).\n")
 
-    out = {"model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
+    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "results": results}
     tag = args.model.split("/")[-1]
     path = os.path.join(args.out_dir, f"transport_{tag}_L{args.layer}.json")

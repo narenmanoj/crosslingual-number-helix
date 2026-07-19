@@ -306,11 +306,14 @@ collapse in the final layers — *consistent with* later form-specific specializ
 sweep doesn't identify the cause of the decline; it could also reflect helix-fit-quality or
 anisotropy changes). H2 holds at *every* layer. **Where it peaks moves with the model:**
 
-| model | sharing peak | profile |
+| model | sharing peak (max `subspace_cos`) | profile |
 |---|---|---|
-| Qwen2.5-7B | ~L14 / 28 (mid) | single mid hump |
+| Qwen2.5-7B | ~L8 / 28 (mid; broad plateau L7–16) | single mid hump |
 | Mistral-Nemo-Base | ~L22 / 40 (mid-late) | broad plateau L18–28 |
-| Aya-23-8B | ~L25 / 32 (late) | bimodal, mid dip, late global peak |
+| Aya-23-8B | ~L19 / 32 (late) | bimodal, mid dip, late peak |
+
+(Causal interventions are run at each model's *max-helix-R²* layer — Qwen L14, Mistral L22, Aya L25 —
+which sits inside this sharing band; the sharing-`subspace_cos` peak above can differ by a few layers.)
 
 So "shared **mid**-band" is *not* universal. What's universal: the ordering, sharing far above
 floor, and the late-layer collapse. Localization becoming a finding in itself (multilingual-
@@ -324,10 +327,10 @@ random control:
 
 | source form | subspace_shift | random_shift | ratio |
 |---|---|---|---|
-| en_digit (within-form) | +0.98 | +0.03 | ~39× |
-| es_word (cross-language) | +1.13 | −0.00 | ~∞ |
-| fr_word (cross-language) | +1.11 | +0.04 | ~31× |
-| devanagari (cross-script) | +1.79 | +0.01 | ~224× |
+| en_digit (within-form) | +1.03 | +0.02 | ~52× |
+| es_word (cross-language) | +1.21 | +0.00 | ~∞ |
+| fr_word (cross-language) | +1.15 | +0.04 | ~29× |
+| devanagari (cross-script) | +1.78 | +0.01 | ~178× |
 
 Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
 words and Devanagari digits — **the shared subspace is sufficient to drive the answer regardless of

@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices
+from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
 from src.helix import fit_helix
 from src.alignment import subspace_alignment, random_subspace_floor
 
@@ -227,7 +227,7 @@ def main():
     sc = os.path.join(args.out_dir, f"geombehav_{tag}_L{layer}.png")
     fig2.savefig(sc, dpi=130)
 
-    out = {"model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
+    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(),
            "clean_contrasts": clean_contrasts, "word_to_word_cells": word_cells,
            "share_vs_en_digit": share, "arithmetic_acc": acc,
