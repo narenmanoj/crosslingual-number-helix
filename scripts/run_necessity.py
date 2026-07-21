@@ -76,7 +76,7 @@ def answer_token_id(tok, v):
 @torch.no_grad()
 def forward(model, tok, device, prompt, layer=None, want_hidden=False):
     enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
-    out = model(**enc)
+    out = model(**enc, output_hidden_states=True)
     logits = out.logits[0, -1, :].float().cpu().numpy()
     h = out.hidden_states[layer][0].float().cpu().numpy() if want_hidden else None
     return logits, h, enc["input_ids"].shape[1]

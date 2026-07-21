@@ -48,10 +48,13 @@ def load_model(name: str, device: str | None = "auto"):
         # AutoModelForCausalLM; text-only forward still works via the image-text-to-text class.
         from transformers import AutoModelForImageTextToText
         model = AutoModelForImageTextToText.from_pretrained(name, **kw)
-    # normalize nested (multimodal) configs so downstream .config.num_hidden_layers / .hidden_size work
+    # normalize nested (multimodal) configs so downstream .config.num_hidden_layers / .hidden_size work,
+    # and force output_hidden_states at both levels (multimodal wrappers ignore the top-level flag).
     cfg = model.config
+    cfg.output_hidden_states = True
     tcfg = getattr(cfg, "text_config", None)
     if tcfg is not None:
+        tcfg.output_hidden_states = True
         for attr in ("num_hidden_layers", "hidden_size"):
             if getattr(cfg, attr, None) is None and getattr(tcfg, attr, None) is not None:
                 setattr(cfg, attr, getattr(tcfg, attr))
@@ -93,7 +96,7 @@ def extract_form_activations(
 
     for _, number_str, prompt in tqdm(prompts, desc="extract", leave=False):
         enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
-        out = model(**enc)
+        out = model(**enc, output_hidden_states=True)
         hs = out.hidden_states  # tuple length n_layers, each [1, seq, d_model]
         seq_len = hs[0].shape[1]
         if pooling == "prompt_last":

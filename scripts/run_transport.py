@@ -72,7 +72,7 @@ def answer_token_id(tok, v: int) -> int:
 @torch.no_grad()
 def logits_last(model, tok, device, prompt, want_hidden=False, layer=None):
     enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
-    out = model(**enc)
+    out = model(**enc, output_hidden_states=True)
     logits = out.logits[0, -1, :].float().cpu().numpy()
     h = None
     if want_hidden:

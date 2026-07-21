@@ -74,7 +74,7 @@ def answer_token_id(tok, v):
 @torch.no_grad()
 def forward_logits(model, tok, device, prompt, want_hidden=False):
     enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
-    out = model(**enc)
+    out = model(**enc, output_hidden_states=True)
     logits = out.logits[0, -1, :].float().cpu().numpy()
     hs = None
     if want_hidden:
