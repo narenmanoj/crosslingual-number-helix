@@ -7,5 +7,17 @@ scikit-learn>=1.4
 num2words>=0.5.13
 matplotlib>=3.8
 tqdm>=4.66
-# optional, for the step-3 causal-transport milestone:
+
+# --- Hybrid Mamba/SSM models only (Nemotron-Nano, Granite-4, Falcon-H1) ---
+# NOT needed for any transformer model (Qwen, Mistral, EuroLLM, Gemma, OLMo, ...).
+# IMPORTANT: these two build CUDA kernels and need `torch` present at build time, so this file
+# must be installed with build isolation OFF (torch is already in your cluster env):
+#     pip install --no-build-isolation -r requirements.txt
+# The other packages above have wheels, so --no-build-isolation is safe for them. On new GPUs
+# (RTX 5090 / sm_120) expect a from-source build; if it fails, comment these two back out and the
+# transformer models still run fine (only the hybrid-SSM architecture runs are lost).
+causal-conv1d>=1.4
+mamba-ssm>=2.2
+
+# optional, for an alternative activation-patching backend:
 # nnsight>=0.3
