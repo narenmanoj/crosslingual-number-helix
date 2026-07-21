@@ -34,13 +34,27 @@ def pick_dtype(device: str):
 def load_model(name: str, device: str | None = "auto"):
     device = pick_device(device)
     dtype = pick_dtype(device)
-    tok = AutoTokenizer.from_pretrained(name)
+    tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
     if not tok.is_fast:
         raise RuntimeError(
             f"Tokenizer for {name} is not a fast tokenizer; offset mapping is required. "
             "Pick a model with a fast tokenizer."
         )
-    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype, output_hidden_states=True)
+    kw = dict(torch_dtype=dtype, output_hidden_states=True, trust_remote_code=True)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(name, **kw)
+    except (ValueError, KeyError):
+        # multimodal wrappers (e.g. Gemma-4 *ForConditionalGeneration) aren't registered under
+        # AutoModelForCausalLM; text-only forward still works via the image-text-to-text class.
+        from transformers import AutoModelForImageTextToText
+        model = AutoModelForImageTextToText.from_pretrained(name, **kw)
+    # normalize nested (multimodal) configs so downstream .config.num_hidden_layers / .hidden_size work
+    cfg = model.config
+    tcfg = getattr(cfg, "text_config", None)
+    if tcfg is not None:
+        for attr in ("num_hidden_layers", "hidden_size"):
+            if getattr(cfg, attr, None) is None and getattr(tcfg, attr, None) is not None:
+                setattr(cfg, attr, getattr(tcfg, attr))
     model.to(device).eval()
     return model, tok, device
 

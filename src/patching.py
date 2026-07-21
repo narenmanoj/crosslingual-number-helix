@@ -27,9 +27,31 @@ from src.helix import fourier_basis, DEFAULT_PERIODS, fit_helix
 from src.alignment import orthonormal_basis
 
 
+_LAYER_PATHS = (
+    "model.layers",                 # Llama/Qwen/Mistral/EuroLLM/OLMo/Granite/Falcon-H1 (standard)
+    "model.language_model.layers",  # Gemma-4 (multimodal wrapper -> text submodule)
+    "backbone.layers",              # Nemotron-H (hybrid Mamba/attn)
+    "model.backbone.layers",
+)
+
+
 def get_decoder_layers(model):
-    """Works for Llama/Qwen/Mistral/Gemma-style HF models."""
-    return model.model.layers
+    """Return the list of decoder blocks whose output IS the residual stream.
+
+    Handles the common paths across architectures (standard transformers, Gemma multimodal
+    nesting, Nemotron-H hybrid). For hybrid models (Nemotron/Granite/Falcon-H1) a block may be
+    Mamba/MLP/attention, but each still does norm->mixer->residual-add, so hooking its output
+    captures the residual stream all the same."""
+    for path in _LAYER_PATHS:
+        obj = model
+        try:
+            for attr in path.split("."):
+                obj = getattr(obj, attr)
+            return obj
+        except AttributeError:
+            continue
+    raise AttributeError(
+        "could not locate decoder layers; add this model's path to _LAYER_PATHS in src/patching.py")
 
 
 def patch_residual(model, layer_idx: int, position: int, new_vector: torch.Tensor):
