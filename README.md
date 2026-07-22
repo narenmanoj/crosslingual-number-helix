@@ -13,38 +13,41 @@ specific hypothesis, and how the code tests it.
 > Fourier "helix"; that helix subspace is **shared** across scripts, notations, and languages —
 > but only *partially*, and the degree of sharing degrades as the surface transformation grows.
 
-Thesis: **partial geometric universality, heterogeneous computational use.** Evidence (7 models,
-6 orgs, **incl. a non-transformer**):
+Thesis: **partial geometric universality, heterogeneous computational use.** Evidence (**9 base
+causal models across 7 orgs + 3 non-transformer architectures**, plus 1 instruct model
+representational-only; all causal claims now carry **bootstrap 95% CIs + paired significance**):
 
 - **Graded sharing (H2):** with clean per-axis contrasts, `language` is the **consistently
   least-shared** axis, far above a random floor, in every model tested. `script` and `notation` are
   both high but their *relative* order varies by model. Magnitude varies; the language-is-lowest
   ordering doesn't.
-- **Exposure-dependent script sharing (new):** cross-*script* sharing spans **0.51→0.83** and tracks
+- **Exposure-dependent script sharing:** cross-*script* sharing spans **0.51→0.83** and tracks
   (multi)script training — multilingual models (Qwen3 119-lang 0.83, Mistral 0.80, Qwen2.5 0.77,
   Granite 0.76) share strongly; English-primary OLMo-3 is lowest (0.51). (Aya, multilingual but 0.53,
   is a caveat — likely *numeral-script* exposure specifically, not general multilinguality.)
-- **Architecture-independent (new):** the helix, cross-form sharing, causal transport, and
-  necessity all appear in **Granite-4 (a hybrid Mamba-2/MoE, not a transformer)** — so the geometry
-  is not a transformer artifact.
-- **Localized, family-specifically:** sharing peaks in a layer band then collapses; the peak layer
-  varies by model (mid in Qwen, mid-late in Mistral, late in Aya). The ordering, not the location,
-  is universal.
-- **Causally *sufficient* everywhere:** patching the shared subspace with a value steers arithmetic
-  for *every* form, while a **norm-matched** random subspace does essentially nothing — replicated in
-  **5 base families** (Qwen2.5, Qwen3, Mistral-Nemo, OLMo-3, Granite-4). The strong universal claim.
-- **Causally *necessary*, but model/layer-dependent, whole-span only:** ablating the shared subspace
-  (vs covariance-matched + shuffled-Fourier nulls) drops arithmetic accuracy helix-specifically — but
-  for multi-token words you must ablate the **whole span**. Strength varies: **Granite** shows the
-  cleanest `script > language` necessity (Arabic-Indic helix-ablate 0.21 vs 0.75 null); **Qwen**
-  broad; **Mistral** English-digits-mainly (its cross-form reliance was winner's curse on held-out).
+- **Architecture-independent:** the helix, cross-form sharing, and causal transport all appear in the
+  three **non-transformers** — Granite-4 (hybrid Mamba-2/MoE), Falcon-H1 (parallel hybrid), and
+  Nemotron-Nano (Mamba-2 hybrid) — so the geometry is not a transformer artifact.
+- **Causally *sufficient* everywhere — the strong universal claim.** Injecting the shared subspace
+  (subspace-only) with a value steers arithmetic for *every* form, while a **norm-matched** random
+  subspace does essentially nothing: **45/45 model×form cells significant** (95% CI excludes 0),
+  across all 9 models and every script/notation/language axis. Matched-source interchange (real
+  activation, subspace-only, vs norm-matched random) is likewise **45/45**.
+- **Causally *necessary* — real but weaker, script-specific, and depth-dependent.** Two instruments:
+  (i) **vs a random null across depth** (layer sweep, held-out): significant for **~80% of
+  *interpretable* script cells** (clean-acc ≥ 0.6) but ~0% for spelled-out words — and necessity
+  peaks *shallower* (L1–L7) than the representational sharing layer. (ii) **vs a matched *structured*
+  null** (shuffled-Fourier) the margin shrinks: the shared directions are partly **redundant** with
+  other structured directions. Necessity for foreign number-*words* is largely undefined — base
+  models often can't do the arithmetic there to begin with (floor clean-acc).
 
 **Net:** number geometry is partially shared across scripts, notations, and languages, in
-transformers *and* a Mamba/SSM model; the shared directions are **causally sufficient** to drive
-arithmetic in every form (5 base families), while **reliance** is helix-specific but **model- and
-layer-dependent**. Sharing is graded (language always lowest), and **cross-script sharing tracks
-training exposure**. **Causal results need base models; Aya (instruct) is representational-only.** We
-make *no* temporal "read-layer" claim — see [Limitations](#limitations--planned-strengthening).
+transformers *and* three Mamba/hybrid models; the shared directions are **causally sufficient** to
+drive arithmetic in every form (universal, 45/45 with CIs), while **reliance** is helix-specific but
+**weaker, script-biased, and shallower** than the sharing layer. Sharing is graded (language always
+lowest), and **cross-script sharing tracks training exposure**. **Causal results need base models;
+Aya (instruct) is representational-only.** We make *no* temporal "read-layer" claim — see
+[Limitations](#limitations--planned-strengthening).
 
 ---
 
@@ -185,7 +188,7 @@ scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single la
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
 scripts/run_transport.py      # STEP 3 sufficiency: causal cross-form transport + full/subspace/random controls
 scripts/run_necessity.py      # STEP 3 necessity (single layer): ablation + matched-source interchange
-scripts/run_ablation_sweep.py    # necessity vs layer: helix-ablation Δ per layer (exploratory; NOT a read-layer)
+scripts/run_ablation_sweep.py    # necessity vs layer: helix-vs-random Δ per layer + helix-vs-STRUCTURED nulls at the peak (held-out CIs)
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/run_structure.py      # #6 pairwise form x form matrix + #7 geometry<->behavior (one model load)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
@@ -254,10 +257,13 @@ python scripts/analyze_stats.py --out-dir experiments --b 20000
 
 `analyze_stats.py` prints a per-(model, form) table — effect, **95% CI**, one-sided *p*, and a
 `***`/`n.s.` flag (significant ⇔ CI excludes 0) — plus a significance summary and a **forest plot**
-(`stats_forest.png`, colored by axis). It covers three claims: **sufficiency** (subspace−random
-shift), **necessity** (chosen structured-null−helix accuracy drop; `--null shuf_fourier|cov_matched|random`),
-and **matched-source interchange** (subspace−norm-matched-random). The ablation sweep additionally
-reports its own held-out Δ with a bootstrap CI in `run_ablation_sweep`'s peak table.
+(`stats_forest.png`, colored by axis). It covers four claims: **sufficiency** (subspace−random
+shift), **matched-source interchange** (subspace−norm-matched-random), **necessity** (structured-null−helix
+accuracy drop at the sharing layer; `--null shuf_fourier|cov_matched|random`), and **necessity_peak**
+— the same structured-null test but at the *necessity peak* depth, ingested from
+`run_ablation_sweep`'s held-out structured-null pass. Empty panels (e.g. `necessity_peak` on older
+JSONs) are dropped automatically. The sweep also prints Δ-vs-random and Δ-vs-shuffled-Fourier side by
+side in its own peak table.
 
 ### The three metrics (validated on synthetic ground-truth cases)
 - **`subspace_cos`** — principal-angle cosine between the two helix subspaces. **The primary,
@@ -283,17 +289,20 @@ not, by itself, for a "value-not-token" mechanism (see the H2 note above).
 ## Results so far
 
 Status by hypothesis. Runs use the **bug-fixed** helix code (consistent `nmax` normalization; rank-8
-basis). Models: **7 total, 6 orgs, incl. a non-transformer** — Qwen2.5-7B, Qwen3-8B, Mistral-Nemo-Base,
-OLMo-3-7B, Granite-4-h-tiny (hybrid Mamba/MoE) are base + causal; Aya-23-8B is instruct → representational.
+basis). Causal legs: **9 base models, 7 orgs, 3 non-transformer architectures** — Qwen2.5-7B,
+Qwen3-8B, Qwen3-14B, Mistral-Nemo-Base, OLMo-3-7B, EuroLLM-9B, Granite-4-h-tiny (Mamba-2/MoE),
+Falcon-H1-7B (parallel hybrid), Nemotron-Nano-12B (Mamba-2 hybrid); Aya-23-8B is instruct →
+representational. All causal results carry **bootstrap 95% CIs + paired significance** (`analyze_stats.py`).
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all 7 models |
+| **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all models |
 | **exposure-dependent** script sharing | cross-script sharing 0.51→0.83, tracks (multi)script training | ✅ (Aya a caveat) |
-| **architecture-independence** | helix + transport + necessity in a **Mamba/MoE** model | ✅ Granite-4 |
+| **architecture-independence** | helix + transport in **3 Mamba/hybrid** models | ✅ Granite-4, Falcon-H1, Nemotron |
 | **mechanistic** localization | sharing peaks in a band, then collapses; peak layer family-specific | ✅ all |
-| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ **5 base families** |
-| **H3** causal *necessity* | whole-span ablation drops accuracy helix-specifically | ✅ **model/layer-dependent** (cleanest cross-script in Granite) |
+| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ **45/45 cells sig** (95% CI) |
+| **H3** matched-source interchange | real activation, subspace-only ≫ norm-matched random | ✅ **45/45 cells sig** |
+| **H3** causal *necessity* | ablation drops accuracy helix-specifically | ◐ **script-biased, shallower than sharing**; strong vs random null (~80% script cells), weaker vs structured |
 
 > Note on models: the causal arithmetic readout needs a **base** model (instruct Aya scores
 > `clean_acc` ≈ 0 — a readout limitation, not a negative). Granite-4 & Falcon-H1 (native-`transformers`
@@ -303,16 +312,16 @@ OLMo-3-7B, Granite-4-h-tiny (hybrid Mamba/MoE) are base + causal; Aya-23-8B is i
 
 | claim | status |
 |---|---|
-| Fourier number geometry appears across the tested forms | **supported** (7 models, incl. a Mamba/MoE) |
+| Fourier number geometry appears across the tested forms | **supported** (9 models, incl. 3 Mamba/hybrid) |
 | Helix subspaces align above an isotropic random floor | **supported** |
-| `language` is the least-shared axis (clean word-to-word contrasts) | **replicated** (all 7 models) |
+| `language` is the least-shared axis (clean word-to-word contrasts) | **replicated** (all models) |
 | `script ≈ notation` (relative order) | **model-dependent** (Qwen3 script>notation; OLMo notation>script) |
 | Cross-**script** sharing tracks (multi)script training exposure | **supported, tentative** (0.51→0.83; Aya a caveat) |
-| Helix + transport + necessity in a **non-transformer** (Mamba/MoE) | **supported** (Granite-4) |
-| Cross-form helix intervention steers restricted digit-choice logits | **supported** (5 base families) |
-| Steering survives **isotropic + norm-matched** controls | **supported**; covariance/sensitivity-matched interchange controls **pending** |
-| The shared subspace is *naturally necessary* (whole-span, matched nulls) | **model/form/layer-dependent**: cleanest cross-script in Granite; Qwen broad; Mistral English-digits |
-| Value is *read* earlier than it is shared | **not established** |
+| Helix + transport in **non-transformers** (Mamba/hybrid) | **supported** (Granite-4, Falcon-H1, Nemotron) |
+| Cross-form helix intervention steers restricted digit-choice logits | **supported, universal** (45/45 cells, 95% CI excludes 0) |
+| Steering survives **isotropic + norm-matched + matched-source** controls | **supported** (interchange 45/45); covariance/sensitivity-matched **done** via structured nulls |
+| The shared subspace is *naturally necessary* | **script-biased & depth-dependent**: strong vs random null (~80% interpretable script cells), partly redundant vs structured null; language largely undefined (floor clean-acc) |
+| Value is *read* earlier than it is shared | **suggestive**: necessity peaks shallower (L1–L7) than sharing (L14–L24), but *no* formal read-layer claim |
 | Geometry explains behavioral numeracy gaps | **model-dependent, weak** (r 0.06→0.96 across models; frequency-confounded) |
 
 The rest of this section elaborates each row; all headings/claims below are scoped to match it.
@@ -368,27 +377,31 @@ specialized Aya integrates number-form later) is an honest cross-architecture re
 ### H3 (sufficiency): cross-form causal transport works (single layer)
 `run_transport.py` patches a source number's residual (at the sharing-peak layer) with the
 `en_digit` helix's encoding of a *different* value, inside `"a + b = "`, and measures whether the
-answer moves toward the transported value. On Qwen2.5-7B @ L14, subspace `mean_shift` vs the
-random control:
+answer moves toward the transported value. On Qwen2.5-7B @ L14 (overnight run, 120 cases/form),
+subspace `mean_shift` vs the random control:
 
 | source form | subspace_shift | random_shift | ratio |
 |---|---|---|---|
-| en_digit (within-form) | +1.03 | +0.02 | ~52× |
-| es_word (cross-language) | +1.21 | +0.00 | ~∞ |
-| fr_word (cross-language) | +1.15 | +0.04 | ~29× |
-| devanagari (cross-script) | +1.78 | +0.01 | ~178× |
+| en_digit (within-form) | +0.89 | +0.02 | ~44× |
+| es_word (cross-language) | +1.14 | +0.00 | ~∞ |
+| fr_word (cross-language) | +1.21 | +0.02 | ~60× |
+| devanagari (cross-script) | +1.71 | +0.01 | ~170× |
+| arabic_indic (cross-script) | +2.52 | −0.01 | ~∞ |
 
 Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
 words and Devanagari digits — **the shared subspace is sufficient to drive the answer regardless of
-surface form** — while an equal-dimension random subspace does essentially nothing. This holds
-against a **norm-matched** random control (`run_necessity.py` interchange: subspace_shift ≫
-matched_random, e.g. Qwen es_word 1.36 vs 0.06, devanagari 1.54 vs 0.08) — so the effect is the
-*specific helix directions*, not just "a large enough perturbation." Replicated on Mistral-Nemo
-(weaker magnitudes, same pattern).
+surface form** — while an equal-dimension random subspace does essentially nothing. Across the
+9-model overnight run this is **universal: 45/45 model×form cells significant** (bootstrap 95% CI
+excludes 0), on transformers *and* the three Mamba/hybrid models. It holds against a **norm-matched**
+random control (`run_necessity.py` matched-source interchange, also **45/45**: real activation,
+subspace-only ≫ norm-matched random) — so the effect is the *specific helix directions*, not just "a
+large enough perturbation." Effect *magnitudes* are not cross-model comparable (different readout
+scales, e.g. OLMo ~5 logits vs Falcon ~0.1); significance is the claim.
 
-> Scope: this passes **isotropic** and **norm-matched** random controls. It does *not* fully settle
-> the Makelov concern (a selected subspace can act through a parallel pathway) — that needs
-> covariance/sensitivity-matched interchange controls (☐ pending) plus the necessity evidence below.
+> Scope: this passes **isotropic**, **norm-matched**, and **matched-source** (real-activation
+> interchange) controls, and the necessity legs add covariance-matched + shuffled-Fourier structured
+> nulls. The residual Makelov concern (a selected subspace acting through a parallel pathway) is
+> addressed by the necessity evidence below rather than fully settled by sufficiency alone.
 
 **Caveat — across-layer causal localization is deliberately *not* a headline.** Raw transport
 magnitude isn't comparable across layers (an earlier intervention propagates through more layers →
@@ -398,38 +411,46 @@ bigger logit shift regardless of sharing). The layer-normalized `subspace/full` 
 the across-layer version is at best a language-forms supplement / future work (proper causal
 tracing).
 
-### H3 (necessity): the model *relies* on the shared subspace — whole-span, and model-dependently
+### H3 (necessity): reliance is real but weaker than sufficiency — script-biased and shallower
 Sufficiency shows the circuit *can* read an injected direction; necessity asks whether the model
 *relies* on the shared subspace. `run_necessity.py` mean-ablates the `en_digit`-fit helix subspace
-from a source number and measures the (restricted digit-choice) accuracy drop, against three nulls —
-Haar-random, **covariance-matched** (random subspace in the top activation PCA), and
-**shuffled-Fourier** (a helix fit through the same pipeline on shuffled labels). Two lessons, both
-from the review:
+and measures the (restricted digit-choice) accuracy drop vs three nulls — Haar-random,
+**covariance-matched** (random subspace in the top activation PCA), and **shuffled-Fourier** (a helix
+fit through the same pipeline on shuffled labels). `run_ablation_sweep.py` repeats the random-null
+ablation at every depth (discovery/test split → held-out Δ + bootstrap CI), and now also evaluates
+the **structured** nulls at the discovery-selected necessity peak. Across the **9-model** overnight
+run (bootstrap 95% CIs, `analyze_stats.py`):
 
 **1. Multi-token forms must be ablated over the *whole span*, not the last token.** Number-words are
-1.5–2 tokens; ablating only the last fragment leaves most of the value intact. Qwen helix-ablate
-accuracy vs the *strong* shuffled-Fourier null:
+1.5–2 tokens; ablating only the last fragment leaves most of the value intact (last-token language
+"necessity" is indistinguishable from the matched nulls; whole-span makes it measurable). All causal
+legs use `--intervention-pos span`. Ablating the token *after* the number does ~nothing (clean
+negative control).
 
-| Qwen form | last-token (helix vs shuf) | **whole-span** (helix vs shuf) |
-|---|---|---|
-| es_word | 0.54 vs 0.54 — *not* helix-specific | **0.33 vs 0.43** — helix-specific |
-| fr_word | 0.62 vs 0.69 | **0.38 vs 0.50** |
-| de_word | 0.79 vs 0.80 — nothing | **0.29 vs 0.50** |
+**2. The null you pick sets the strength of the claim.** Necessity is strong against a *random*
+subspace and much weaker against a *matched structured* one:
 
-At the last token, language-word "necessity" is indistinguishable from the matched nulls. Under
-whole-span ablation it becomes clearly helix-specific. So the earlier "script > language necessity
-gradient" was largely a **last-fragment measurement artifact** — Spanish/French/German numbers *do*
-rely on the shared subspace. (Ablating the token *after* the number does ~nothing: a clean negative
-control.)
+| instrument (held-out, 95% CI) | null | script cells sig | language cells sig |
+|---|---|---|---|
+| **layer sweep** (`run_ablation_sweep`) | Haar-random | **~80%** (21/26, clean-acc ≥ 0.6) | ~0% |
+| **single layer @ sharing peak** (`run_necessity`) | shuffled-Fourier | ~50% | ~0% |
 
-**2. Reliance is model-dependent.** Under whole-span ablation Qwen shows helix-specific necessity
-across scripts *and* languages. **Mistral-Nemo does not** — even whole-span, and across a full
-ablation-layer sweep, its cross-form necessity vanishes on held-out data (`run_ablation_sweep.py`
-discovery/test split: Mistral devanagari Δ 0.25→**0.08**, es_word 0.25→**0.00**; only en_digit holds
-at 0.25). Mistral relies on the shared subspace mainly for English digits and is otherwise redundant.
+So the model relies on *structured low-rank number geometry* robustly (for scripts), but the specific
+`en_digit`-helix directions are **partly redundant** with other structured directions — the honest,
+reviewer-proof framing. The `--null-seeds` structured-null-at-peak pass (new) reports helix vs
+shuffled-Fourier **at the necessity peak** so this claim can be stated at its strongest depth, not
+just at the sharing layer.
+
+**3. Necessity peaks *shallower* than sharing, and is script-biased.** Script necessity peaks at
+L1–L7 while the causal legs run at the mid-depth *sharing* peak (L14–L24) — sufficiency (injection)
+and necessity (removal) bite at different layers. Foreign number-*word* necessity is largely
+**undefined**: base models often can't do es/fr arithmetic to begin with (floor clean-acc, e.g.
+Falcon es 0.04, EuroLLM fr 0.17), and even where they can (Mistral es/fr 0.92) the Δ is small with
+CIs touching 0. This holds across transformers *and* the three Mamba/hybrid models.
 
 The nulls do real work: covariance-matched ablation removes *more* activation energy than the helix
-yet leaves arithmetic intact, so the effect is the specific helix directions, not removed energy.
+yet leaves arithmetic intact, so where an effect survives it is the specific helix directions, not
+removed energy.
 
 > **No temporal / "read-layer" claim.** An earlier ablation-layer analysis suggested the value is
 > "read earlier than it is shared." That does not hold up: the removed-helix energy varies wildly
@@ -539,10 +560,12 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - [x] **Step 3 necessity — whole-span ablation vs matched nulls** (cov-matched + shuffled-Fourier): model-dependent (Qwen broad, Mistral English-digits)
 - [x] **#6 pairwise matrix + clean H2 contrasts** (reference-form confound fixed); #7 geometry↔behavior model-dependent (dropped as headline)
 - [x] **External-review hardening**: bug fixes; matched controls; multi-token interventions; held-out splits; committed result JSONs; **read-layer claim dropped**
-- [x] **Family expansion**: Qwen3-8B, OLMo-3-7B, Granite-4 (Mamba/MoE) → 5 base causal families / 6 orgs → the **exposure-dependent script-sharing** + **architecture-independence** threads
-- [ ] **Falcon-H1-7B** (2nd Mamba/SSM point — no `mamba-ssm` needed) + **EuroLLM-9B** causal re-run + **Gemma-4** (multimodal-loader verify) + Nemotron (needs `mamba-ssm`)
-- [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model)
-- [x] **Statistics infrastructure**: per-case logging in all three causal legs + `analyze_stats.py` (bootstrap 95% CIs, paired significance, forest plot) + `run_overnight.sh` (unattended full-model loop with per-model cache cleanup)
+- [x] **Family expansion → 9 base causal models / 7 orgs / 3 non-transformers**: + Qwen3-14B, EuroLLM-9B, Falcon-H1-7B (parallel hybrid), Nemotron-Nano-12B (Mamba-2 hybrid) → the **exposure-dependent script-sharing** + **architecture-independence** threads
+- [x] **Statistics infrastructure**: per-case logging in all causal legs + `analyze_stats.py` (bootstrap 95% CIs, paired significance, forest plot) + `run_overnight.sh` (unattended full-model loop, per-model cache cleanup)
+- [x] **9-model overnight run**: sufficiency **45/45** + interchange **45/45** significant; necessity script-biased & shallower than sharing (see H3 necessity)
+- [x] **Per-layer structured nulls**: `run_ablation_sweep` now tests helix vs cov-matched + shuffled-Fourier **at the necessity peak** (held-out CIs) → `necessity_peak` claim in `analyze_stats`
+- [ ] **Re-run the overnight loop** to populate `necessity_peak` (structured-null-at-peak) across all 9 models; then finalize the necessity claim at its strongest depth
+- [ ] **Gemma-4** (multimodal-loader verify) + **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model)
 - [ ] **Extend eval** (main-conf reach): multi-digit, subtraction, comparison, word-form outputs, same-representation operand+answer; more cases/form for tighter CIs
 - [ ] Optional temporal claim: causal tracing / path patching (only if pursuing the representation-vs-use question)
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)

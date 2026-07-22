@@ -39,8 +39,11 @@ from src import data as D
 from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
 from src.helix import fit_helix
 from src.patching import (
-    helix_subspace_basis, random_subspace_basis, make_patched_vector, patch_residual, subspace_energy,
+    helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
+    make_patched_vector, patch_residual, subspace_energy,
 )
+
+STRUCT_NULLS = ["cov_matched", "shuf_fourier"]  # structured nulls evaluated at the necessity peak
 
 FORM_COLORS = {"en_digit": "#111111", "devanagari_digit": "#2563eb", "arabic_indic_digit": "#7c3aed",
                "fullwidth_digit": "#0891b2", "en_word": "#059669", "es_word": "#dc2626",
@@ -56,7 +59,11 @@ def parse_args():
     p.add_argument("--max-sum", type=int, default=9)
     p.add_argument("--fit-max", type=int, default=99)
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
-    p.add_argument("--n-seeds", type=int, default=3)
+    p.add_argument("--n-seeds", type=int, default=3, help="Haar-random null seeds (the peak-picking null)")
+    p.add_argument("--null-seeds", type=int, default=5, help="seeds for the STRUCTURED nulls at the peak layer")
+    p.add_argument("--structured-nulls", dest="structured_nulls", action="store_true", default=True,
+                   help="also test helix vs cov-matched + shuffled-Fourier nulls at the discovery peak (default on)")
+    p.add_argument("--no-structured-nulls", dest="structured_nulls", action="store_false")
     p.add_argument("--pooling", default="mean", help="only to locate the matching correlational sweep json")
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
@@ -134,6 +141,7 @@ def main():
         cases = [(a, b) for b in args.addends for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
         # per-case correctness so we can aggregate honestly (per-seed, no rounding) + split
         clean_c = []
+        used_cases = []  # (a, b) that survived tokenization, aligned with the per-case arrays
         helix_c = {L: [] for L in sweep_layers}
         rand_c = {L: [[] for _ in range(args.n_seeds)] for L in sweep_layers}
         energy_c = {L: [] for L in sweep_layers}
@@ -145,6 +153,7 @@ def main():
             except ValueError:
                 continue
             Lc, hidden = forward_logits(model, tok, device, prompt, want_hidden=True)
+            used_cases.append((a, b))
             clean_c.append(int(int(np.argmax([Lc[ans_ids[v]] for v in range(0, args.max_sum + 1)])) == a + b))
             for L in sweep_layers:
                 h_orig = hidden[L][pos]
@@ -173,12 +182,47 @@ def main():
         test_diff = [float(np.mean([rand_c[Lpk][si][i] for si in range(args.n_seeds)])) - float(helix_c[Lpk][i])
                      for i in test]
         d_test, d_lo, d_hi, d_p = boot_paired(test_diff, seed=args.seed) if len(test) else (float("nan"),) * 4
+
+        # --- STRUCTURED-NULL necessity at the discovery-selected peak layer (held-out cases) ---
+        # The random null above answers "helix vs noise". The strong claim is "helix vs a matched
+        # STRUCTURED subspace": cov-matched (energy-matched) and shuffled-Fourier (same fit pipeline
+        # on shuffled labels). We evaluate these only at Lpk on the held-out half -> cheap + rigorous.
+        peak_struct = {}
+        if args.structured_nulls and len(test):
+            HLpk = acts[Lpk]
+            null_bases = {
+                "cov_matched": [covariance_matched_basis(HLpk, r, seed=args.seed + i) for i in range(args.null_seeds)],
+                "shuf_fourier": [shuffled_fourier_basis(HLpk, fit_numbers, k_pca=args.k_pca, seed=args.seed + i)
+                                 for i in range(args.null_seeds)],
+            }
+            null_case = {c: [] for c in null_bases}          # per held-out case, acc mean over null seeds
+            helix_test = [float(helix_c[Lpk][i]) for i in test]
+            for i in test:
+                a, b = used_cases[i]
+                a_str = D.FORMS[form].render(a)
+                prompt = f"{a_str} + {b} = "
+                pos = _number_token_indices(tok, prompt, a_str)[-1]
+                _, hidden = forward_logits(model, tok, device, prompt, want_hidden=True)
+                h_orig = hidden[Lpk][pos]
+                for c, bases in null_bases.items():
+                    ok = [patched_correct(model, tok, device, prompt, Lpk - 1, pos,
+                                          make_patched_vector(h_orig, mean_L[Lpk], Q=Qn, mode="subspace"),
+                                          ans_ids, args.max_sum, a + b) for Qn in bases]
+                    null_case[c].append(float(np.mean(ok)))
+            for c in null_bases:
+                diff = [null_case[c][j] - helix_test[j] for j in range(len(test))]  # null_acc - helix_acc
+                est, lo, hi, p = boot_paired(diff, seed=args.seed)
+                peak_struct[c] = {"delta": est, "ci": [lo, hi], "p": p, "per_case": diff}
+
         curves[form] = {"clean": float(np.mean(clean_c)), "helix": helix_acc, "rand": rand_acc,
                         "rand_std": rand_std, "delta": delta_full, "removed_energy": energy,
                         "peak_layer_discovery": Lpk, "delta_at_peak_heldout": d_test,
                         "delta_at_peak_heldout_ci": [d_lo, d_hi], "delta_at_peak_heldout_p": d_p,
-                        "per_case_heldout_peak": test_diff}
-        print(f"  done {form} (clean_acc={curves[form]['clean']:.2f})")
+                        "per_case_heldout_peak": test_diff,
+                        "heldout_peak_structured": peak_struct}
+        ps = peak_struct.get("shuf_fourier")
+        extra = f" | Δvs_shuf@L{Lpk}={ps['delta']:.2f} [{ps['ci'][0]:.2f},{ps['ci'][1]:.2f}]" if ps else ""
+        print(f"  done {form} (clean_acc={curves[form]['clean']:.2f}){extra}")
 
     delta = {f: curves[f]["delta"] for f in args.forms}
 
@@ -211,7 +255,8 @@ def main():
     fig.savefig(png, dpi=130)
 
     out = {"model_revision": model_revision(model, args.model), "layers": sweep_layers, "r": r,
-           "forms": args.forms, "n_seeds": args.n_seeds,
+           "forms": args.forms, "n_seeds": args.n_seeds, "null_seeds": args.null_seeds,
+           "structured_nulls": args.structured_nulls,
            "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")
     with open(js, "w") as fh:
@@ -220,19 +265,22 @@ def main():
     # peak table -- report the HELD-OUT Δ at the discovery-selected peak (avoids winner's curse),
     # plus the removed-helix-energy at that layer (intervention norm varies with depth: the raw peak
     # is NOT a clean read-layer; see README Limitations).
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 96)
     print("NECESSITY PEAK per form  (peak layer chosen on DISCOVERY half, Δ reported on HELD-OUT half)")
-    print("-" * 80)
-    print(f"  {'form':<18}{'clean':>7}{'peak-L(disc)':>14}{'Δ heldout [95% CI]':>24}{'p':>7}{'E@peak':>9}")
+    print("  Δ vs random = helix vs noise (weak null) | Δ vs shuf_fourier = helix vs matched STRUCTURED null (strong)")
+    print("-" * 96)
+    print(f"  {'form':<20}{'clean':>6}{'pkL':>4}{'Δ vs random [95% CI]':>24}{'Δ vs shuf_fourier [95% CI]':>28}{'E@pk':>8}")
     for f in args.forms:
-        pk_disc = curves[f]["peak_layer_discovery"]
-        e_at = curves[f]["removed_energy"][sweep_layers.index(pk_disc)]
-        lo, hi = curves[f]["delta_at_peak_heldout_ci"]
-        ci = f"{curves[f]['delta_at_peak_heldout']:.2f} [{lo:.2f}, {hi:.2f}]"
-        print(f"  {f:<18}{curves[f]['clean']:>7.2f}{pk_disc:>14}{ci:>24}"
-              f"{curves[f]['delta_at_peak_heldout_p']:>7.3f}{e_at:>9.1f}")
-    print("  (Δ>0 with CI excluding 0 => model relies on the shared helix subspace at that depth)")
-    print("=" * 78)
+        C_ = curves[f]
+        pk_disc = C_["peak_layer_discovery"]
+        e_at = C_["removed_energy"][sweep_layers.index(pk_disc)]
+        lo, hi = C_["delta_at_peak_heldout_ci"]
+        rnd = f"{C_['delta_at_peak_heldout']:.2f} [{lo:.2f}, {hi:.2f}]"
+        ps = C_.get("heldout_peak_structured", {}).get("shuf_fourier")
+        shuf = f"{ps['delta']:.2f} [{ps['ci'][0]:.2f}, {ps['ci'][1]:.2f}]" if ps else "--"
+        print(f"  {f:<20}{C_['clean']:>6.2f}{pk_disc:>4}{rnd:>24}{shuf:>28}{e_at:>8.1f}")
+    print("  (Δ vs shuf_fourier > 0 with CI excluding 0 => necessary even vs a matched structured subspace)")
+    print("=" * 96)
     print(f"Saved -> {js}\n         {png}\n")
 
 

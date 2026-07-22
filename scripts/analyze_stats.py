@@ -57,6 +57,14 @@ def want(tag, models):
     return models is None or any(m in tag for m in models)
 
 
+def axis_of(form):
+    if form == "en_word":
+        return "notation"
+    if form.endswith("_word"):
+        return "language"
+    return "script"
+
+
 def main():
     args = parse_args()
     rows = []   # (claim, model, form, axis, est, lo, hi, p, n)
@@ -101,6 +109,21 @@ def main():
             est, lo, hi, p, n = boot(sub[:m] - mr[:m], args.b)
             rows.append(("interchange", tag, form, I.get("axis", "?"), est, lo, hi, p, n))
 
+    # ---------- NECESSITY at the peak layer, vs the STRUCTURED null (the strong claim) ----------
+    # run_ablation_sweep evaluates helix vs shuffled-Fourier at the discovery-selected necessity peak
+    # on held-out cases; per_case = null_acc - helix_acc (positive => helix necessary beyond structure).
+    for f in sorted(glob.glob(os.path.join(args.out_dir, "ablation_sweep_*.json"))):
+        tag = os.path.basename(f)[len("ablation_sweep_"):-len(".json")]
+        if not want(tag, args.models):
+            continue
+        d = json.load(open(f))
+        for form, C in d.get("curves", {}).items():
+            ps = C.get("heldout_peak_structured", {}).get(args.null)
+            if not ps or "per_case" not in ps:
+                continue
+            est, lo, hi, p, n = boot(np.array(ps["per_case"], float), args.b)
+            rows.append(("necessity_peak", tag, form, axis_of(form), est, lo, hi, p, n))
+
     if not rows:
         print("No per-case data found. Re-run run_transport/run_necessity (they now save per_case).")
         return
@@ -112,15 +135,15 @@ def main():
     print(f"BOOTSTRAP CIs + PAIRED TESTS  (B={args.b}; necessity null = {args.null}; effect [95% CI], one-sided p)")
     print("  sufficiency = subspace_shift - random_shift | necessity = null_acc - helix_acc | interchange = subspace - matched_random")
     print("-" * 104)
-    print(f"  {'claim':<12}{'model':<26}{'form':<20}{'axis':<9}{'effect':>9}{'95% CI':>20}{'p':>9}{'sig':>6}{'n':>5}")
+    print(f"  {'claim':<16}{'model':<26}{'form':<20}{'axis':<9}{'effect':>9}{'95% CI':>20}{'p':>9}{'sig':>6}{'n':>5}")
     for claim, tag, form, axis, est, lo, hi, p, n in rows:
-        print(f"  {claim:<12}{tag[:25]:<26}{form:<20}{axis:<9}{est:>9.3f}"
+        print(f"  {claim:<16}{tag[:25]:<26}{form:<20}{axis:<9}{est:>9.3f}"
               f"{('['+format(lo,'.2f')+', '+format(hi,'.2f')+']'):>20}{p:>9.3f}{sig(lo,hi):>6}{n:>5}")
     print("=" * 104)
 
     # summary: fraction of (model,form) that are significant, per claim
     print("\nSIGNIFICANCE SUMMARY (fraction of model x form with 95% CI excluding 0):")
-    for claim in ["sufficiency", "necessity", "interchange"]:
+    for claim in ["sufficiency", "interchange", "necessity", "necessity_peak"]:
         cr = [r for r in rows if r[0] == claim]
         if cr:
             frac = np.mean([(lo > 0 or hi < 0) for _, _, _, _, _, lo, hi, _, _ in cr])
@@ -135,7 +158,9 @@ def main():
         json.dump(out, fh, indent=2)
 
     panels = [("sufficiency", "subspace − random  (logit shift)"),
-              ("necessity", f"{args.null} − helix  (accuracy drop)")]
+              ("necessity_peak", f"{args.null} − helix @ peak  (acc drop, strong null)"),
+              ("necessity", f"{args.null} − helix @ share-layer  (acc drop)")]
+    panels = [p for p in panels if any(r[0] == p[0] for r in rows)]  # drop empty panels
     fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 8))
     axes = np.atleast_1d(axes)
     for ax, (claim, xlabel) in zip(axes, panels):
