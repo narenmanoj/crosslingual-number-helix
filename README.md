@@ -189,6 +189,8 @@ scripts/run_ablation_sweep.py    # necessity vs layer: helix-ablation Δ per lay
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/run_structure.py      # #6 pairwise form x form matrix + #7 geometry<->behavior (one model load)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
+scripts/analyze_stats.py      # bootstrap 95% CIs + paired significance tests over the per-case logs (no model load)
+scripts/run_overnight.sh      # unattended full-model loop -> per-case logs -> analyze_stats (per-model cache cleanup)
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
 
@@ -235,6 +237,27 @@ It (1) extracts the residual-stream vector at each number's last token for every
 (2) fits the helix per form and reports R² (with a shuffled-label control that should collapse
 to ~0), then (3) reports three alignment metrics vs the `en_digit` reference against a
 **random-subspace floor**, and saves JSON to `experiments/`.
+
+### Significance runs (bootstrap CIs + paired tests)
+
+The causal legs log per-case outcomes, so significance is a separate, model-free step:
+
+```bash
+# unattended: every base model -> transport + necessity(span) + ablation-sweep -> stats
+bash scripts/run_overnight.sh                          # writes experiments/ + a timestamped log
+OUT_DIR=exp_night1 MODELS="Qwen/Qwen2.5-7B ibm-granite/granite-4.0-h-tiny-base" \
+    bash scripts/run_overnight.sh                      # subset / custom output dir
+
+# aggregate any set of per-case JSONs already in a dir (no model load, seconds):
+python scripts/analyze_stats.py --out-dir experiments --b 20000
+```
+
+`analyze_stats.py` prints a per-(model, form) table — effect, **95% CI**, one-sided *p*, and a
+`***`/`n.s.` flag (significant ⇔ CI excludes 0) — plus a significance summary and a **forest plot**
+(`stats_forest.png`, colored by axis). It covers three claims: **sufficiency** (subspace−random
+shift), **necessity** (chosen structured-null−helix accuracy drop; `--null shuf_fourier|cov_matched|random`),
+and **matched-source interchange** (subspace−norm-matched-random). The ablation sweep additionally
+reports its own held-out Δ with a bootstrap CI in `run_ablation_sweep`'s peak table.
 
 ### The three metrics (validated on synthetic ground-truth cases)
 - **`subspace_cos`** — principal-angle cosine between the two helix subspaces. **The primary,
@@ -492,8 +515,14 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
   operand+answer (main-conference reach).
 - ✅ **Reproducibility.** Compact result JSONs (model revision hash, intervention norms, per-seed
   curves) are now committed (`.gitignore` keeps only large figures/caches out).
-- ☐ **Statistical power.** ~24–40 cases/form; report bootstrap CIs and expand the case set before
-  final figures.
+- ◐ **Statistical power.** The causal legs now log **per-case** outcomes (`per_case_shift` in
+  transport; `per_case` clean/helix/controls in necessity + interchange; `per_case_heldout_peak` in
+  the ablation sweep). `scripts/analyze_stats.py` reads those and reports **bootstrap 95% CIs +
+  paired significance** per (model, form): sufficiency (subspace−random shift), necessity
+  (structured-null−helix accuracy drop, vs shuffled-Fourier by default), and matched-source
+  interchange (subspace−norm-matched-random). A finding is called significant only when its 95% CI
+  **excludes 0** (stricter than the one-sided *p* also reported). ☐ *Open:* raise cases/form (defaults
+  bumped — transport 80, overnight 120; necessity 8 seeds) and regenerate final figures with CIs.
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
@@ -513,7 +542,8 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - [x] **Family expansion**: Qwen3-8B, OLMo-3-7B, Granite-4 (Mamba/MoE) → 5 base causal families / 6 orgs → the **exposure-dependent script-sharing** + **architecture-independence** threads
 - [ ] **Falcon-H1-7B** (2nd Mamba/SSM point — no `mamba-ssm` needed) + **EuroLLM-9B** causal re-run + **Gemma-4** (multimodal-loader verify) + Nemotron (needs `mamba-ssm`)
 - [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model)
-- [ ] **Extend eval** (main-conf reach): multi-digit, subtraction, comparison, word-form outputs, same-representation operand+answer; bootstrap CIs + more cases
+- [x] **Statistics infrastructure**: per-case logging in all three causal legs + `analyze_stats.py` (bootstrap 95% CIs, paired significance, forest plot) + `run_overnight.sh` (unattended full-model loop with per-model cache cleanup)
+- [ ] **Extend eval** (main-conf reach): multi-digit, subtraction, comparison, word-form outputs, same-representation operand+answer; more cases/form for tighter CIs
 - [ ] Optional temporal claim: causal tracing / path patching (only if pursuing the representation-vs-use question)
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
 - [ ] Write-up — figures: pairwise heatmap, whole-span necessity (matched nulls), transport (norm-matched), layer sweep; vs FARS (2605.09496) + universal-numbers (2510.26285)

@@ -51,7 +51,7 @@ def parse_args():
     p.add_argument("--layer", type=int, default=14, help="hidden_states index to fit + patch (7B~14, 1.5B~12)")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9, help="keep answers single-token")
-    p.add_argument("--pairs-per-form", type=int, default=40)
+    p.add_argument("--pairs-per-form", type=int, default=80, help="raise for tighter CIs (cap ~all valid triples)")
     p.add_argument("--fit-max", type=int, default=99, help="fit the en_digit helix on 0..fit_max")
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--device", default=C.DEVICE)
@@ -164,6 +164,8 @@ def main():
                           "flip_rate": float(np.mean(per_mode[m]["flip"])) if per_mode[m]["flip"] else float("nan"),
                           "n": per_mode[m]["n"]}
                       for m in MODES},
+            # per-case arrays (aligned across modes) for bootstrap CIs + paired significance tests
+            "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in MODES},
         }
 
     # --- report (long format: one row per form x mode) ---

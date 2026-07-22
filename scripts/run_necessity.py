@@ -58,7 +58,7 @@ def parse_args():
     p.add_argument("--pairs-per-form", type=int, default=40)
     p.add_argument("--fit-max", type=int, default=99)
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
-    p.add_argument("--n-seeds", type=int, default=5)
+    p.add_argument("--n-seeds", type=int, default=8, help="control-null seeds; more = tighter null bands")
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
@@ -140,6 +140,9 @@ def main():
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
         energy = {"helix": []} | {c: [] for c in CONTROLS}
+        # per-case correctness (0/1 for clean+helix; per-case mean-over-seeds 0..1 for each null)
+        clean_case, helix_case = [], []
+        ctrl_case = {c: [] for c in CONTROLS}
         tok_counts, n = [], 0
         for (a, b) in ab_cases:
             a_str = D.FORMS[form].render(a)
@@ -152,15 +155,19 @@ def main():
             positions = intervention_positions(idxs, args.intervention_pos, seq_len)
             n += 1
             tok_counts.append(len(idxs))
-            clean_ok += int(argmax_ans(Lc) == a + b)
+            cc = int(argmax_ans(Lc) == a + b); clean_ok += cc; clean_case.append(cc)
             # helix ablation (mean-ablate the helix subspace at each chosen position)
             p2v = {p: make_patched_vector(hidden[p], mean_vec, Q=Q, mode="subspace") for p in positions}
-            helix_ok += int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
+            hc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
+            helix_ok += hc; helix_case.append(hc)
             energy["helix"].append(subspace_energy(Q, hidden[positions[-1]], mean_vec))
             for c in CONTROLS:
+                seed_correct = []
                 for si, Qc in enumerate(ctrl_bases[c]):
                     p2v = {p: make_patched_vector(hidden[p], mean_vec, Q=Qc, mode="subspace") for p in positions}
-                    ctrl_ok[c][si] += int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
+                    sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
+                    ctrl_ok[c][si] += sc; seed_correct.append(sc)
+                ctrl_case[c].append(float(np.mean(seed_correct)))
                 energy[c].append(subspace_energy(ctrl_bases[c][0], hidden[positions[-1]], mean_vec))
         n = max(n, 1)
         ablation[form] = {
@@ -173,6 +180,8 @@ def main():
                              "delta_vs_helix": float((ctrl_ok[c] / n).mean() - helix_ok / n)}
                          for c in CONTROLS},
             "removed_energy": {k: float(np.mean(v)) for k, v in energy.items()},
+            # per-case arrays for bootstrap CIs + paired tests (helix vs each null, per case)
+            "per_case": {"clean": clean_case, "helix": helix_case, "controls": ctrl_case},
         }
 
         # ---------- (B) MATCHED-SOURCE INTERCHANGE ----------
@@ -204,6 +213,8 @@ def main():
             "axis": D.FORMS[form].axis, "n": len(sub_shift),
             "subspace_shift": float(np.mean(sub_shift)) if sub_shift else float("nan"),
             "matched_random_shift": float(np.mean(matched_shift)) if matched_shift else float("nan"),
+            # per-case (aligned) for bootstrap CI + paired subspace-vs-matched-random test
+            "per_case": {"subspace": sub_shift, "matched_random": matched_shift},
         }
         print(f"  done {form}")
 

@@ -72,6 +72,19 @@ def answer_token_id(tok, v):
     return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
+def boot_paired(diff, B=10000, seed=0, alpha=0.05):
+    """Percentile bootstrap of mean(diff) for a per-case paired-difference array.
+    Returns (est, lo, hi, p_one_sided=P(mean<=0)). Kept local so the sweep is self-contained."""
+    x = np.asarray(diff, dtype=float)
+    x = x[~np.isnan(x)]
+    if len(x) < 2:
+        return (float(x.mean()) if len(x) else float("nan"), float("nan"), float("nan"), float("nan"))
+    rng = np.random.default_rng(seed)
+    means = x[rng.integers(0, len(x), size=(B, len(x)))].mean(1)
+    lo, hi = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(x.mean()), float(lo), float(hi), float(np.mean(means <= 0))
+
+
 @torch.no_grad()
 def forward_logits(model, tok, device, prompt, want_hidden=False):
     enc = tok(prompt, return_tensors="pt", add_special_tokens=True).to(device)
@@ -154,11 +167,17 @@ def main():
         disc, test = idx[:half], idx[half:]
         d_disc = [float(np.mean(seed_acc(L, disc))) - float(np.mean([helix_c[L][i] for i in disc])) for L in sweep_layers]
         pk = int(np.nanargmax(d_disc)) if half else 0
-        d_test = (float(np.mean(seed_acc(sweep_layers[pk], test)))
-                  - float(np.mean([helix_c[sweep_layers[pk]][i] for i in test]))) if len(test) else float("nan")
+        Lpk = sweep_layers[pk]
+        # per-case paired diff on the HELD-OUT half at the discovery-selected peak layer:
+        #   rand-ablate acc (mean over seeds) - helix-ablate acc, per case  -> bootstrap CI + p
+        test_diff = [float(np.mean([rand_c[Lpk][si][i] for si in range(args.n_seeds)])) - float(helix_c[Lpk][i])
+                     for i in test]
+        d_test, d_lo, d_hi, d_p = boot_paired(test_diff, seed=args.seed) if len(test) else (float("nan"),) * 4
         curves[form] = {"clean": float(np.mean(clean_c)), "helix": helix_acc, "rand": rand_acc,
                         "rand_std": rand_std, "delta": delta_full, "removed_energy": energy,
-                        "peak_layer_discovery": sweep_layers[pk], "delta_at_peak_heldout": d_test}
+                        "peak_layer_discovery": Lpk, "delta_at_peak_heldout": d_test,
+                        "delta_at_peak_heldout_ci": [d_lo, d_hi], "delta_at_peak_heldout_p": d_p,
+                        "per_case_heldout_peak": test_diff}
         print(f"  done {form} (clean_acc={curves[form]['clean']:.2f})")
 
     delta = {f: curves[f]["delta"] for f in args.forms}
@@ -204,14 +223,16 @@ def main():
     print("\n" + "=" * 80)
     print("NECESSITY PEAK per form  (peak layer chosen on DISCOVERY half, Δ reported on HELD-OUT half)")
     print("-" * 80)
-    print(f"  {'form':<18}{'clean':>7}{'peak-L(disc)':>14}{'Δ heldout':>11}{'raw max-Δ':>11}{'E@peak':>9}")
+    print(f"  {'form':<18}{'clean':>7}{'peak-L(disc)':>14}{'Δ heldout [95% CI]':>24}{'p':>7}{'E@peak':>9}")
     for f in args.forms:
-        d = np.array(delta[f])
         pk_disc = curves[f]["peak_layer_discovery"]
         e_at = curves[f]["removed_energy"][sweep_layers.index(pk_disc)]
-        print(f"  {f:<18}{curves[f]['clean']:>7.2f}{pk_disc:>14}{curves[f]['delta_at_peak_heldout']:>11.2f}"
-              f"{d.max():>11.2f}{e_at:>9.1f}")
-    print("=" * 66)
+        lo, hi = curves[f]["delta_at_peak_heldout_ci"]
+        ci = f"{curves[f]['delta_at_peak_heldout']:.2f} [{lo:.2f}, {hi:.2f}]"
+        print(f"  {f:<18}{curves[f]['clean']:>7.2f}{pk_disc:>14}{ci:>24}"
+              f"{curves[f]['delta_at_peak_heldout_p']:>7.3f}{e_at:>9.1f}")
+    print("  (Δ>0 with CI excluding 0 => model relies on the shared helix subspace at that depth)")
+    print("=" * 78)
     print(f"Saved -> {js}\n         {png}\n")
 
 
