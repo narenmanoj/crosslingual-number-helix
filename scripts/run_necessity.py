@@ -222,14 +222,14 @@ def main():
     print("\n" + "=" * 96)
     print(f"(A) ABLATION necessity  (pos={args.intervention_pos})  -- helix-ablate acc << every null (~clean) => used")
     print("-" * 96)
-    hdr = f"  {'form':<18}{'axis':<9}{'tok':>4}{'clean':>7}{'helix':>7}"
+    hdr = f"  {'form':<20}{'axis':<9}{'tok':>4}{'clean':>7}{'helix':>7}"
     for c in CONTROLS:
         hdr += f"{c[:9]:>11}"
     hdr += f"{'E:helix/cov':>13}"
     print(hdr)
     for form in args.forms:
         A = ablation[form]
-        row = f"  {form:<18}{A['axis']:<9}{A['mean_tok_count']:>4.1f}{A['clean_acc']:>7.2f}{A['acc_helix_ablate']:>7.2f}"
+        row = f"  {form:<20}{A['axis']:<9}{A['mean_tok_count']:>4.1f}{A['clean_acc']:>7.2f}{A['acc_helix_ablate']:>7.2f}"
         for c in CONTROLS:
             row += f"{A['controls'][c]['acc_mean']:>8.2f}±{A['controls'][c]['acc_std']:.2f}"
         row += f"{A['removed_energy']['helix']:>7.1f}/{A['removed_energy']['cov_matched']:.1f}"
@@ -238,10 +238,10 @@ def main():
     print("=" * 96)
     print(f"\n(B) MATCHED-SOURCE INTERCHANGE  -- subspace_shift >> norm-matched-random_shift => real, not energy artifact")
     print("-" * 96)
-    print(f"  {'form':<18}{'axis':<9}{'subspace_shift':>16}{'matched_random':>16}")
+    print(f"  {'form':<20}{'axis':<9}{'subspace_shift':>16}{'matched_random':>16}")
     for form in args.forms:
         I = interchange[form]
-        print(f"  {form:<18}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
+        print(f"  {form:<20}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
     print("=" * 96 + "\n")
 
     out = {"model_revision": model_revision(model, args.model), "layer": args.layer,
