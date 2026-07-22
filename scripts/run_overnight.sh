@@ -23,7 +23,10 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-PY="${python}"
+# Python interpreter: honor $PY, else the project venv, else system python3.
+if [[ -z "${PY:-}" ]]; then
+  if [[ -x .venv/bin/python ]]; then PY=.venv/bin/python; else PY=python3; fi
+fi
 OUT_DIR="${OUT_DIR:-experiments}"
 PAIRS="${PAIRS:-120}"          # transport / interchange cases per form (tighter CIs)
 NSEEDS="${NSEEDS:-10}"         # necessity control-null seeds
