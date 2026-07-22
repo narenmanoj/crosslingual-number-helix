@@ -70,7 +70,7 @@ def answer_token_id(tok, v):
         ids = tok.encode(s, add_special_tokens=False)
         if len(ids) == 1:
             return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[0]
+    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 @torch.no_grad()

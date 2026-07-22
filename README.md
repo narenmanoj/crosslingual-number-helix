@@ -13,30 +13,38 @@ specific hypothesis, and how the code tests it.
 > Fourier "helix"; that helix subspace is **shared** across scripts, notations, and languages —
 > but only *partially*, and the degree of sharing degrades as the surface transformation grows.
 
-Thesis: **partial geometric universality, heterogeneous computational use.** Evidence:
+Thesis: **partial geometric universality, heterogeneous computational use.** Evidence (7 models,
+6 orgs, **incl. a non-transformer**):
 
-- **Graded sharing (H2):** with clean per-axis contrasts, cross-form alignment falls
-  `script ≈ notation > language`, every form far above a random floor — robust across **three**
-  model families (Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B) and three activation readouts. Magnitude
-  varies by family; the *ordering* doesn't.
-- **Localized, family-specifically:** sharing peaks in a layer band then collapses; mid-network in
-  Qwen, mid-late in Mistral-Nemo, late in Aya (the ordering, not the location, is universal).
+- **Graded sharing (H2):** with clean per-axis contrasts, `language` is the **consistently
+  least-shared** axis, far above a random floor, in every model tested. `script` and `notation` are
+  both high but their *relative* order varies by model. Magnitude varies; the language-is-lowest
+  ordering doesn't.
+- **Exposure-dependent script sharing (new):** cross-*script* sharing spans **0.51→0.83** and tracks
+  (multi)script training — multilingual models (Qwen3 119-lang 0.83, Mistral 0.80, Qwen2.5 0.77,
+  Granite 0.76) share strongly; English-primary OLMo-3 is lowest (0.51). (Aya, multilingual but 0.53,
+  is a caveat — likely *numeral-script* exposure specifically, not general multilinguality.)
+- **Architecture-independent (new):** the helix, cross-form sharing, causal transport, and
+  necessity all appear in **Granite-4 (a hybrid Mamba-2/MoE, not a transformer)** — so the geometry
+  is not a transformer artifact.
+- **Localized, family-specifically:** sharing peaks in a layer band then collapses; the peak layer
+  varies by model (mid in Qwen, mid-late in Mistral, late in Aya). The ordering, not the location,
+  is universal.
 - **Causally *sufficient* everywhere:** patching the shared subspace with a value steers arithmetic
-  for *every* form, while a **norm-matched** random subspace does essentially nothing (Qwen2.5-7B,
-  Mistral-Nemo-Base). This is the strong, universal causal claim.
-- **Causally *necessary*, but model-dependent, and only under whole-span ablation:** ablating the
-  shared subspace (vs covariance-matched and shuffled-Fourier nulls) *drops* arithmetic accuracy —
-  helix-specifically — but for multi-token number-words you must ablate the **whole span**, not the
-  last token (last-token under-ablates). Under whole-span ablation **Qwen** relies on the shared
-  subspace across scripts *and* languages; **Mistral-Nemo** relies mainly for English digits and is
-  otherwise redundant (its apparent cross-form reliance was winner's curse, gone on held-out data).
+  for *every* form, while a **norm-matched** random subspace does essentially nothing — replicated in
+  **5 base families** (Qwen2.5, Qwen3, Mistral-Nemo, OLMo-3, Granite-4). The strong universal claim.
+- **Causally *necessary*, but model/layer-dependent, whole-span only:** ablating the shared subspace
+  (vs covariance-matched + shuffled-Fourier nulls) drops arithmetic accuracy helix-specifically — but
+  for multi-token words you must ablate the **whole span**. Strength varies: **Granite** shows the
+  cleanest `script > language` necessity (Arabic-Indic helix-ablate 0.21 vs 0.75 null); **Qwen**
+  broad; **Mistral** English-digits-mainly (its cross-form reliance was winner's curse on held-out).
 
-**Net:** number geometry is partially shared across scripts, notations, and languages; the shared
-directions are **causally sufficient** to drive arithmetic in every form, while **reliance** on them
-is helix-specific but **model-dependent** (broad in Qwen, English-digit-centric in Mistral-Nemo).
-Sharing is graded (`script > language`). **Causal results need base models; Aya (instruct) is
-representational-only.** We make *no* temporal "read-layer" claim — see
-[Limitations](#limitations--planned-strengthening).
+**Net:** number geometry is partially shared across scripts, notations, and languages, in
+transformers *and* a Mamba/SSM model; the shared directions are **causally sufficient** to drive
+arithmetic in every form (5 base families), while **reliance** is helix-specific but **model- and
+layer-dependent**. Sharing is graded (language always lowest), and **cross-script sharing tracks
+training exposure**. **Causal results need base models; Aya (instruct) is representational-only.** We
+make *no* temporal "read-layer" claim — see [Limitations](#limitations--planned-strengthening).
 
 ---
 
@@ -251,54 +259,69 @@ not, by itself, for a "value-not-token" mechanism (see the H2 note above).
 
 ## Results so far
 
-Status by hypothesis (as of this writing; Llama-3.1-8B pending HF gated-repo approval).
-All results use the **bug-fixed** helix code (consistent `nmax` normalization; rank-8 basis, see
-below). The fixes left the representational results essentially unchanged.
+Status by hypothesis. Runs use the **bug-fixed** helix code (consistent `nmax` normalization; rank-8
+basis). Models: **7 total, 6 orgs, incl. a non-transformer** — Qwen2.5-7B, Qwen3-8B, Mistral-Nemo-Base,
+OLMo-3-7B, Granite-4-h-tiny (hybrid Mamba/MoE) are base + causal; Aya-23-8B is instruct → representational.
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** shared, graded geometry | `script ≈ notation > language` (clean contrasts), all ≫ floor | ✅ Qwen2.5-7B, Mistral-Nemo-Base, Aya-23-8B |
-| **mechanistic** localization | sharing peaks in a band, then collapses late | ✅ band is **family-specific** |
-| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ Qwen2.5-7B + Mistral-Nemo (base) |
-| **H3** causal *necessity* | whole-span ablation drops accuracy, helix-specifically | ✅ **model-dependent**: Qwen broad (scripts+languages), Mistral English-digits mainly |
+| **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all 7 models |
+| **exposure-dependent** script sharing | cross-script sharing 0.51→0.83, tracks (multi)script training | ✅ (Aya a caveat) |
+| **architecture-independence** | helix + transport + necessity in a **Mamba/MoE** model | ✅ Granite-4 |
+| **mechanistic** localization | sharing peaks in a band, then collapses; peak layer family-specific | ✅ all |
+| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ **5 base families** |
+| **H3** causal *necessity* | whole-span ablation drops accuracy helix-specifically | ✅ **model/layer-dependent** (cleanest cross-script in Granite) |
 
-> Note on models: the causal arithmetic readout needs a **base** model. Qwen2.5-7B, Mistral-Nemo-Base,
-> and Llama-3.1-8B are base; Aya-23-8B is instruction-tuned, so it is used for the *representational*
-> results only (its causal `clean_acc` ≈ 0 — a readout limitation, not a negative result).
+> Note on models: the causal arithmetic readout needs a **base** model (instruct Aya scores
+> `clean_acc` ≈ 0 — a readout limitation, not a negative). Granite-4 & Falcon-H1 (native-`transformers`
+> hybrids) run without `mamba-ssm` via the pure-PyTorch fallback; only Nemotron (remote code) requires it.
 
 ### Evidence status (claim-by-claim — the scoped view)
 
 | claim | status |
 |---|---|
-| Fourier number geometry appears across the tested forms | **supported** |
+| Fourier number geometry appears across the tested forms | **supported** (7 models, incl. a Mamba/MoE) |
 | Helix subspaces align above an isotropic random floor | **supported** |
-| `script ≈ notation > language` (clean word-to-word contrasts) | **replicated** (3 families) |
-| Cross-form helix intervention steers restricted digit-choice logits | **supported** |
+| `language` is the least-shared axis (clean word-to-word contrasts) | **replicated** (all 7 models) |
+| `script ≈ notation` (relative order) | **model-dependent** (Qwen3 script>notation; OLMo notation>script) |
+| Cross-**script** sharing tracks (multi)script training exposure | **supported, tentative** (0.51→0.83; Aya a caveat) |
+| Helix + transport + necessity in a **non-transformer** (Mamba/MoE) | **supported** (Granite-4) |
+| Cross-form helix intervention steers restricted digit-choice logits | **supported** (5 base families) |
 | Steering survives **isotropic + norm-matched** controls | **supported**; covariance/sensitivity-matched interchange controls **pending** |
-| The shared subspace is *naturally necessary* (whole-span, matched nulls) | **model/form-dependent**: Qwen broad; Mistral English-digits; some number-words still modest |
-| Ablation Δ peaks earlier than alignment | **observed descriptively** (confounded — see Limitations) |
+| The shared subspace is *naturally necessary* (whole-span, matched nulls) | **model/form/layer-dependent**: cleanest cross-script in Granite; Qwen broad; Mistral English-digits |
 | Value is *read* earlier than it is shared | **not established** |
-| Geometry explains behavioral numeracy gaps | **not supported** (weak, frequency-confounded) |
+| Geometry explains behavioral numeracy gaps | **model-dependent, weak** (r 0.06→0.96 across models; frequency-confounded) |
 
 The rest of this section elaborates each row; all headings/claims below are scoped to match it.
 
-### H2 (graded invariance) replicated across families — with clean contrasts
+### H2 (graded invariance) across models — with clean contrasts
 Per-axis `subspace_cos` using the **correct reference per axis** (script: en_digit↔digit-scripts;
 notation: en_digit↔en_word; language: **en_word↔foreign words**, not en_digit↔words — see
-`run_structure.py`). This fixes a reference-form confound: comparing en_digit to foreign *words*
-changes both notation and language, and inflates the apparent language drop.
+`run_structure.py`; this fixes a reference-form confound that inflated the apparent language drop).
 
-| axis | Qwen2.5-7B | Mistral-Nemo-Base | floor |
-|---|---|---|---|
-| script | 0.77 | 0.80 | ~0.04 |
-| notation | 0.74 | 0.83 | ~0.04 |
-| language | 0.52 | 0.60 | ~0.04 |
+| model | org | arch | langs | script | notation | language |
+|---|---|---|---|---|---|---|
+| Qwen3-8B | Alibaba | transformer | 119 | **0.83** | 0.71 | 0.54 |
+| Mistral-Nemo-Base | Mistral | transformer | multi | 0.80 | 0.83 | 0.60 |
+| Qwen2.5-7B | Alibaba | transformer | multi | 0.77 | 0.74 | 0.52 |
+| Granite-4-h-tiny | IBM | **Mamba/MoE** | 12 | 0.76 | 0.85 | 0.64 |
+| Aya-23-8B | Cohere | transformer | 23 | 0.53 | 0.52 | 0.32 |
+| OLMo-3-7B | AI2 | transformer | EN-primary | 0.51 | 0.76 | 0.37 |
 
-`script ≈ notation > language` holds in **three independent families** (Aya replicates the ordering;
-see the JSONs), every form far above the floor. Two honest notes: the magnitude is *not* universal
-(Aya is weaker), and with the clean contrast the **language gap is smaller** than an en_digit-referenced
-table suggests — number-words form their own moderately-shared cluster (e.g. Qwen `en_word↔es_word`
-0.55, `es_word↔fr_word` 0.50).
+(floor ~0.04–0.06 everywhere.) Two robust reads and one honest caveat:
+
+- **`language` is the least-shared axis in every model** — the universal part of H2.
+- **`script` sharing spans 0.51→0.83 and tracks (multi)script training exposure:** the four
+  multilingual models cluster at 0.76–0.83, English-primary OLMo-3 is lowest (0.51). This is the
+  freshest thread — cross-script number geometry *emerges with multiscript exposure*.
+- **Caveat:** Aya (multilingual but 0.53) breaks a clean "multilingual → high," so it's more likely
+  specific *numeral-script* exposure (Devanagari/Arabic-Indic) than general multilinguality — a
+  hypothesis, not a law. And `script` vs `notation` order is **model-dependent** (Qwen3
+  script>notation; OLMo/Granite notation>script), so we do *not* claim `script ≈ notation`.
+
+**Architecture-independence.** Granite-4 is a **hybrid Mamba-2/MoE**, not a transformer, yet shows
+the helix, the same graded sharing, causal transport, and (its cleanest-yet) cross-script necessity —
+evidence the number geometry is not a transformer artifact.
 
 ### Mechanistic: sharing is localized, but the band is family-specific
 The layer sweep (`run_layer_sweep.py`) shows cross-form `subspace_cos` rise, plateau, then
@@ -485,10 +508,11 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
 - [x] **Real run — Qwen2.5-7B**: H2 (graded invariance) replicated, sharing localized to a mid band
 - [x] **Step 3 sufficiency — causal transport** + **norm-matched** control (Qwen + Mistral-Nemo)
 - [x] **Step 3 necessity — whole-span ablation vs matched nulls** (cov-matched + shuffled-Fourier): model-dependent (Qwen broad, Mistral English-digits)
-- [x] **Universality — Aya-23-8B** (representational) + **Mistral-Nemo-Base** (representational + causal): H2 replicates; localization family-specific
-- [x] **#6 pairwise matrix + clean H2 contrasts** (reference-form confound fixed); #7 geometry↔behavior found weak (dropped as headline)
+- [x] **#6 pairwise matrix + clean H2 contrasts** (reference-form confound fixed); #7 geometry↔behavior model-dependent (dropped as headline)
 - [x] **External-review hardening**: bug fixes; matched controls; multi-token interventions; held-out splits; committed result JSONs; **read-layer claim dropped**
-- [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model) — repr. + causal
+- [x] **Family expansion**: Qwen3-8B, OLMo-3-7B, Granite-4 (Mamba/MoE) → 5 base causal families / 6 orgs → the **exposure-dependent script-sharing** + **architecture-independence** threads
+- [ ] **Falcon-H1-7B** (2nd Mamba/SSM point — no `mamba-ssm` needed) + **EuroLLM-9B** causal re-run + **Gemma-4** (multimodal-loader verify) + Nemotron (needs `mamba-ssm`)
+- [ ] **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model)
 - [ ] **Extend eval** (main-conf reach): multi-digit, subtraction, comparison, word-form outputs, same-representation operand+answer; bootstrap CIs + more cases
 - [ ] Optional temporal claim: causal tracing / path patching (only if pursuing the representation-vs-use question)
 - [ ] Time arm — dates/years (DateAugBench has format-invariance puzzles, 2505.16088)
