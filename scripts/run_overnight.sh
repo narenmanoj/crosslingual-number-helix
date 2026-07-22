@@ -23,7 +23,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-PY="${PY:-.venv/bin/python}"
+PY="${python}"
 OUT_DIR="${OUT_DIR:-experiments}"
 PAIRS="${PAIRS:-120}"          # transport / interchange cases per form (tighter CIs)
 NSEEDS="${NSEEDS:-10}"         # necessity control-null seeds
