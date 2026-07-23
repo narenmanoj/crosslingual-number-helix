@@ -26,11 +26,13 @@ NUMS = list(range(100))
 
 
 def _linear_code(d=64, scale=3.0, noise=0.0, seed=0):
-    """Activations carrying an exact centered linear-in-n code along one direction."""
+    """Activations carrying an exact centered linear-in-n code along one direction.
+    Noise is PER-EXAMPLE (shape [n, d]); a 1-D noise vector would be a constant offset removed by
+    centering, making 'noisy' tests effectively noiseless (audit r3 #9)."""
     rng = np.random.default_rng(seed)
     u = rng.standard_normal(d); u /= np.linalg.norm(u)
     n = np.array(NUMS, float)
-    return np.outer((n - n.mean()) / n.std(), u) * scale + rng.standard_normal(d) * noise, u
+    return np.outer((n - n.mean()) / n.std(), u) * scale + rng.standard_normal((len(NUMS), d)) * noise, u
 
 
 def _helix_code(d=64, noise=0.05, seed=0):
@@ -81,13 +83,15 @@ def test_covariance_matched_deterministic():
     assert np.allclose(covariance_matched_basis(H, 8, seed=1), covariance_matched_basis(H, 8, seed=1))
 
 
-def test_procrustes_deterministic_and_leakage_free():
-    H, _ = _linear_code(noise=0.3, seed=1)
-    H2 = H @ orthonormal_basis(RNG.standard_normal((64, 64))).T[:64]  # rotate
-    a = orthogonal_procrustes_cv(H, H, seed=0)
-    b = orthogonal_procrustes_cv(H, H, seed=0)
+def test_procrustes_deterministic_and_recovers_rotation():
+    H, _ = _helix_code(noise=0.05, seed=1)
+    Rq, _ = np.linalg.qr(RNG.standard_normal((64, 64)))       # a true orthogonal rotation of model space
+    H_rot = H @ Rq
+    a = orthogonal_procrustes_cv(H, H_rot, seed=0)
+    b = orthogonal_procrustes_cv(H, H_rot, seed=0)
     assert a == b, "same seed must give identical result (no randomized SVD / leakage RNG drift)"
-    assert a > 0.9, "a form vs itself should align near-perfectly"
+    # the whole point: Procrustes should RECOVER an orthogonal rotation between the two forms
+    assert a > 0.9, f"Procrustes should recover the rotation (held-out R^2 high), got {a}"
 
 
 # ---- audit #7: held-out R^2 ----
@@ -214,15 +218,50 @@ def test_top_pca_span_alias():
     assert covariance_matched_basis is top_pca_span_basis
 
 
-def test_norm_matched_control_delta():
-    # audit #3: a norm-matched control delta must have the SAME norm as the helix delta
+def test_norm_matched_delta_uses_real_helpers():
+    # audit r3 #9: exercise the ACTUAL helpers run_transport uses (not a reimplemented formula)
+    from src.patching import subspace_delta, norm_match
     Q = random_subspace_basis(8, 64, seed=0)
     Qc = random_subspace_basis(8, 64, seed=1)
     diff = RNG.standard_normal(64)
-    dh = Q @ (Q.T @ diff)
-    dc = Qc @ (Qc.T @ diff)
-    dc = dc * (np.linalg.norm(dh) / np.linalg.norm(dc))
+    dh = subspace_delta(diff, Q)
+    dc = norm_match(subspace_delta(diff, Qc), np.linalg.norm(dh))
     assert np.isclose(np.linalg.norm(dh), np.linalg.norm(dc), rtol=1e-6)
+    assert np.isclose(np.linalg.norm(norm_match(np.zeros(64), 5.0)), 0.0)  # no-op on ~0
+
+
+def test_norm_matched_ablation_equalizes_removed_energy():
+    # audit r3 #3: the control ablation must remove the SAME energy as the helix ablation
+    from src.patching import norm_matched_ablation
+    Q = random_subspace_basis(8, 64, seed=0)
+    Qc = random_subspace_basis(8, 64, seed=1)
+    h, mean = RNG.standard_normal(64), RNG.standard_normal(64)
+    helix_removed = np.linalg.norm(Q @ (Q.T @ (h - mean)))
+    control_removed = np.linalg.norm(h - norm_matched_ablation(h, mean, Q_signal=Q, Q_control=Qc))
+    assert np.isclose(helix_removed, control_removed, rtol=1e-6)
+
+
+def test_axis_relabeling_span_vs_coordinates():
+    # audit r3 #9: a true axis relabeling D_B = R D_A keeps the SPAN (principal angles ~1) but changes
+    # per-feature COORDINATES (canonical cosines drop). This is the distinction the metrics must make.
+    D_A = RNG.standard_normal((8, 64))
+    Rq, _ = np.linalg.qr(RNG.standard_normal((8, 8)))         # orthogonal relabeling of the 8 feature axes
+    D_B = Rq @ D_A
+    assert subspace_alignment(D_A, D_B)["mean_cos"] > 0.999, "span (row space) is unchanged by R"
+    coord = canonical_map_cosines({"helix_dirs_model": D_A}, {"helix_dirs_model": D_B})
+    assert coord["mean_abs_cos"] < 0.9, "coordinate identity must DROP under axis relabeling"
+
+
+def test_aggregate_uses_clean_contrasts():
+    # audit r3 #8: cross-model H2 aggregation must consume the clean contrasts, not the confounded summary
+    from aggregate_runs import axis_values
+    vals, src = axis_values({"clean_contrasts": {"script (a)": 0.8, "notation (b)": 0.6, "language (c)": 0.3},
+                             "axis_summary": {"language": {"subspace_cos": 0.9}}})
+    assert src == "clean" and vals["language"] == 0.3
+    vals2, src2 = axis_values({"axis_summary": {"script": {"subspace_cos": 0.9},
+                                                "notation": {"subspace_cos": 0.7},
+                                                "language": {"subspace_cos": 0.5}}})
+    assert src2 == "confounded" and vals2["language"] == 0.5
 
 
 def test_span_energy_identity():

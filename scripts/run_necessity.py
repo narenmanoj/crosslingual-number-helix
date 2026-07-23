@@ -42,7 +42,8 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
 from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
-    make_patched_vector, matched_injection, subspace_energy, patch_residual_multi, assert_hook_equivalence,
+    make_patched_vector, norm_matched_ablation, subspace_delta, norm_match, subspace_energy,
+    patch_residual, patch_residual_multi, assert_hook_equivalence,
 )
 
 CONTROLS = ["random", "cov_matched", "shuf_fourier"]
@@ -117,7 +118,6 @@ def main():
     Q = helix_subspace_basis(fit)
     r = Q.shape[1]
     mean_vec = fit["mean"]
-    en_real = HL
     # control-subspace banks (multi-seed)
     ctrl_bases = {
         "random": [random_subspace_basis(r, d_model, seed=args.seed + i) for i in range(args.n_seeds)],
@@ -142,14 +142,30 @@ def main():
     rng.shuffle(ic_cases)
     ic_cases = ic_cases[: args.pairs_per_form]
 
+    # en_digit ARITHMETIC activations for the DELTA interchange (audit r3 #2): the sufficiency check
+    # now transports a matched-arithmetic value displacement h_en(a',b)-h_en(a,b), NOT an absolute
+    # carrier activation en_real[ap] (which also imported carrier/context/offset).
+    en_arith = {}
+    for (v, b) in {(a, b) for (a, ap, b) in ic_cases} | {(ap, b) for (a, ap, b) in ic_cases}:
+        vs = str(v)
+        ep = f"{vs} + {b} = "
+        try:
+            epos = _number_token_indices(tok, ep, vs)[-1]
+        except ValueError:
+            continue
+        _, eh, _ = forward(model, tok, device, ep, layer=args.layer, want_hidden=True)
+        en_arith[(v, b)] = eh[epos]
+
     ablation, interchange = {}, {}
     for form in args.forms:
         # ---------- (A) ABLATION ----------
-        # Context-matched baseline (audit #12): pull the value-subspace toward THIS form's own
-        # arithmetic-context mean, so the intervention removes value while preserving the form/carrier
-        # offset -- rather than dragging it toward the en_digit "The number n is" carrier mean.
+        # Context-matched baseline (audit #12/#9): pull the value-subspace toward THIS form's own
+        # arithmetic-context mean, CONDITIONED on (token_count, relative token position) so a span
+        # token is ablated toward the mean at its own position/length, not a form-wide pooled mean.
+        # Falls back to the global fit mean for any (tc, rel) bucket with no data.
+        pos_means = {}
         if args.ablation_baseline == "form_arith":
-            vecs = []
+            buckets = {}
             for (a, b) in ab_cases:
                 a_str = D.FORMS[form].render(a)
                 prompt = f"{a_str} + {b} = "
@@ -158,17 +174,19 @@ def main():
                 except ValueError:
                     continue
                 _, hid, sl = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
-                vecs.extend(hid[p] for p in intervention_positions(idxs, args.intervention_pos, sl))
-            mean_vec_form = np.mean(vecs, axis=0) if vecs else mean_vec
-        else:
-            mean_vec_form = mean_vec
+                for p in intervention_positions(idxs, args.intervention_pos, sl):
+                    buckets.setdefault((len(idxs), p - idxs[0]), []).append(hid[p])
+            pos_means = {k: np.mean(v, axis=0) for k, v in buckets.items()}
+
+        def baseline_at(idxs, p):
+            return pos_means.get((len(idxs), p - idxs[0]), mean_vec) if args.ablation_baseline == "form_arith" else mean_vec
 
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
         energy = {"helix": []} | {c: [] for c in CONTROLS}
-        # per-case correctness (0/1 for clean+helix; per-case mean-over-seeds 0..1 for each null)
-        clean_case, helix_case = [], []
-        ctrl_case = {c: [] for c in CONTROLS}
+        clean_case, helix_case, ab_keys = [], [], []
+        ctrl_case = {c: [] for c in CONTROLS}                              # per-case MEAN over seeds
+        ctrl_case_by_seed = {c: [] for c in CONTROLS}                     # per-case list of per-seed 0/1 (audit r3 #3)
         tok_counts, n = [], 0
         for (a, b) in ab_cases:
             a_str = D.FORMS[form].render(a)
@@ -179,28 +197,27 @@ def main():
                 continue
             Lc, hidden, seq_len = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
             positions = intervention_positions(idxs, args.intervention_pos, seq_len)
+            base = {p: baseline_at(idxs, p) for p in positions}           # per-position baseline
             n += 1
-            tok_counts.append(len(idxs))
+            tok_counts.append(len(idxs)); ab_keys.append((a, b))
             cc = int(argmax_ans(Lc) == a + b); clean_ok += cc; clean_case.append(cc)
-            # helix ablation (mean-ablate the helix subspace at each chosen position, toward the
-            # context-matched baseline mean_vec_form)
-            p2v = {p: make_patched_vector(hidden[p], mean_vec_form, Q=Q, mode="subspace") for p in positions}
+            # helix ablation (mean-ablate the helix subspace at each chosen position -> per-position baseline)
+            p2v = {p: make_patched_vector(hidden[p], base[p], Q=Q, mode="subspace") for p in positions}
             hc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
             helix_ok += hc; helix_case.append(hc)
-            # WHOLE-SPAN removed energy: sqrt(sum_p ||QQ^T(h_p - mean)||^2) over ALL patched positions
-            # (not just the last token), so the reported energy matches what the intervention removes.
-            span_energy = lambda Qb: float(np.sqrt(sum(subspace_energy(Qb, hidden[p], mean_vec_form) ** 2
-                                                       for p in positions)))
-            energy["helix"].append(span_energy(Q))
+            # WHOLE-SPAN helix removed energy: sqrt(sum_p ||QQ^T(h_p - base_p)||^2)
+            energy["helix"].append(float(np.sqrt(sum(subspace_energy(Q, hidden[p], base[p]) ** 2 for p in positions))))
             for c in CONTROLS:
                 seed_correct = []
                 for si, Qc in enumerate(ctrl_bases[c]):
-                    p2v = {p: make_patched_vector(hidden[p], mean_vec_form, Q=Qc, mode="subspace") for p in positions}
+                    # NORM-MATCHED ablation: remove the SAME energy as the helix at each position (audit r3 #3)
+                    p2v = {p: norm_matched_ablation(hidden[p], base[p], Q_signal=Q, Q_control=Qc) for p in positions}
                     sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
                     ctrl_ok[c][si] += sc; seed_correct.append(sc)
                 ctrl_case[c].append(float(np.mean(seed_correct)))
-                # energy averaged over ALL control seeds (was: first seed only) and over the whole span
-                energy[c].append(float(np.mean([span_energy(Qc) for Qc in ctrl_bases[c]])))
+                ctrl_case_by_seed[c].append([int(s) for s in seed_correct])
+                # after norm-matching, per-seed removed energy ~ helix energy by construction (report helix's)
+                energy[c].append(energy["helix"][-1])
         n = max(n, 1)
         ablation[form] = {
             "axis": D.FORMS[form].axis, "n": n,
@@ -212,13 +229,20 @@ def main():
                              "delta_vs_helix": float((ctrl_ok[c] / n).mean() - helix_ok / n)}
                          for c in CONTROLS},
             "removed_energy": {k: float(np.mean(v)) for k, v in energy.items()},
-            # per-case arrays for bootstrap CIs + paired tests (helix vs each null, per case)
-            "per_case": {"clean": clean_case, "helix": helix_case, "controls": ctrl_case},
+            "controls_norm_matched": True,
+            # per-case arrays for bootstrap CIs + paired tests + full per-seed fidelity + case keys
+            "per_case": {"clean": clean_case, "helix": helix_case, "controls": ctrl_case,
+                         "controls_by_seed": ctrl_case_by_seed, "keys": ab_keys},
         }
 
-        # ---------- (B) MATCHED-SOURCE INTERCHANGE (shared ic_cases, built once above) ----------
-        sub_shift, matched_shift = [], []
+        # ---------- (B) MATCHED-ARITHMETIC DELTA INTERCHANGE (audit r3 #2) ----------
+        # Sufficiency via the REAL en_digit arithmetic displacement h_en(a',b)-h_en(a,b) added at the
+        # source token (NOT an absolute carrier activation en_real[a'], which also imported carrier /
+        # context / surface-form offset). Control = norm-matched random delta, averaged over ALL seeds.
+        sub_shift, matched_shift, ic_keys = [], [], []
         for (a, ap, b) in ic_cases:
+            if (a, b) not in en_arith or (ap, b) not in en_arith:
+                continue
             a_str = D.FORMS[form].render(a)
             prompt = f"{a_str} + {b} = "
             try:
@@ -227,20 +251,23 @@ def main():
                 continue
             Lc, hidden, _ = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
             base = Lc[ans_ids[ap + b]] - Lc[ans_ids[a + b]]
-            h_orig, target = hidden[pos], en_real[ap]
-            h_sub = make_patched_vector(h_orig, target, Q=Q, mode="subspace")
-            Ls = patched_logits(model, tok, device, prompt, hook_layer, {pos: h_sub})
+            h_orig = hidden[pos]
+            diff = en_arith[(ap, b)] - en_arith[(a, b)]
+            dh = subspace_delta(diff, Q); nh = np.linalg.norm(dh)
+            Ls = patched_logits(model, tok, device, prompt, hook_layer, {pos: h_orig + dh})
             sub_shift.append(float((Ls[ans_ids[ap + b]] - Ls[ans_ids[a + b]]) - base))
-            # NORM-MATCHED random control: same perturbation magnitude, random directions
-            h_mr = matched_injection(h_orig, target, Q_signal=Q, Q_control=ctrl_bases["random"][0])
-            Lm = patched_logits(model, tok, device, prompt, hook_layer, {pos: h_mr})
-            matched_shift.append(float((Lm[ans_ids[ap + b]] - Lm[ans_ids[a + b]]) - base))
+            seed_sh = []
+            for Qc in ctrl_bases["random"]:                              # ALL seeds, each norm-matched
+                dc = norm_match(subspace_delta(diff, Qc), nh)
+                Lm = patched_logits(model, tok, device, prompt, hook_layer, {pos: h_orig + dc})
+                seed_sh.append(float((Lm[ans_ids[ap + b]] - Lm[ans_ids[a + b]]) - base))
+            matched_shift.append(float(np.mean(seed_sh)))
+            ic_keys.append((a, ap, b))
         interchange[form] = {
-            "axis": D.FORMS[form].axis, "n": len(sub_shift),
+            "axis": D.FORMS[form].axis, "n": len(sub_shift), "estimand": "matched_arithmetic_delta",
             "subspace_shift": float(np.mean(sub_shift)) if sub_shift else float("nan"),
             "matched_random_shift": float(np.mean(matched_shift)) if matched_shift else float("nan"),
-            # per-case (aligned) for bootstrap CI + paired subspace-vs-matched-random test
-            "per_case": {"subspace": sub_shift, "matched_random": matched_shift},
+            "per_case": {"subspace": sub_shift, "matched_random": matched_shift, "keys": ic_keys},
         }
         print(f"  done {form}")
 
@@ -270,9 +297,10 @@ def main():
         print(f"  {form:<20}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
     print("=" * 96 + "\n")
 
-    out = {"model_revision": model_revision(model, args.model), "layer": args.layer,
-           "intervention_pos": args.intervention_pos, "r": r, "n_seeds": args.n_seeds,
-           "ablation_baseline": args.ablation_baseline, "hook_rel_error": hook_err,
+    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
+           "layer": args.layer, "intervention_pos": args.intervention_pos, "r": r, "n_seeds": args.n_seeds,
+           "ablation_baseline": args.ablation_baseline, "controls_norm_matched": True,
+           "interchange_estimand": "matched_arithmetic_delta", "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}
     tag = args.model.split("/")[-1]

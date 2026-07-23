@@ -31,25 +31,26 @@ representational-only; all causal claims now carry **bootstrap 95% CIs + paired 
   transformer and hybrid state-space/attention families* rather than "architecture-independent" — 9
   checkpoints across 7 orgs are not 9 independent architecture samples (audit #13); report at
   checkpoint, family, and org granularity.
-- **Causally *sufficient* everywhere — the strong universal claim.** Injecting the shared subspace
-  (subspace-only) with a value steers arithmetic for *every* form, while a **norm-matched** random
-  subspace does essentially nothing: **45/45 model×form cells significant** (95% CI excludes 0),
-  across all 9 models and every script/notation/language axis. Matched-source interchange (real
-  activation, subspace-only, vs norm-matched random) is likewise **45/45**.
-- **Causally *necessary* — real but weaker, script-specific, and depth-dependent.** Two instruments:
-  (i) **vs a random null across depth** (layer sweep, held-out): significant for **~80% of
-  *interpretable* script cells** (clean-acc ≥ 0.6) but ~0% for spelled-out words — and necessity
-  peaks *shallower* (L1–L7) than the representational sharing layer. (ii) **vs a matched *structured*
-  null** (shuffled-Fourier) the margin shrinks: the shared directions are partly **redundant** with
-  other structured directions. Necessity for foreign number-*words* is largely undefined — base
-  models often can't do the arithmetic there to begin with (floor clean-acc).
+- **Causally *sufficient* everywhere — the strong claim (direction validated; magnitudes pending
+  regeneration).** Injecting the shared subspace with a value steers arithmetic for *every* form
+  while a **norm-matched** random subspace does essentially nothing; the new **matched-arithmetic
+  delta transport** (transport only `QQᵀ(h_en(a′,b)−h_en(a,b))`, holding addend/syntax/format/offset
+  fixed) reproduces this on a live model. The exact cell counts and effect sizes below (e.g. "45/45")
+  come from the **pre-overhaul run** and must be regenerated under the corrected fit + new estimands.
+- **Causally *necessary* — real but weaker and script-biased.** Ablating the shared subspace hurts
+  arithmetic more than a random subspace for most *interpretable* script cells (clean-acc ≥ 0.6) but
+  not for spelled-out words; against a matched *structured* null (shuffled-Fourier) the margin
+  shrinks, so the specific directions are partly **redundant** with other structured directions.
+  Foreign number-*word* necessity is largely undefined (base models are near floor there). Necessity
+  is now measured with **per-case norm-matched** controls; the pre-overhaul necessity numbers below
+  are being regenerated.
 
 **Net:** number geometry is partially shared across scripts, notations, and languages, in
 transformers *and* three Mamba/hybrid models; the shared directions are **causally sufficient** to
-drive arithmetic in every form (universal, 45/45 with CIs), while **reliance** is helix-specific but
-**weaker, script-biased, and shallower** than the sharing layer. Sharing is graded (language always
-lowest), and **cross-script sharing tracks training exposure**. **Causal results need base models;
-Aya (instruct) is representational-only.** We make *no* temporal "read-layer" claim — see
+drive arithmetic in every form, while **reliance** is helix-specific but weaker and script-biased.
+Sharing is graded (language always lowest), and **cross-script sharing tracks training exposure**.
+**Causal results need base models; Aya (instruct) is representational-only.** We make *no* temporal
+"read-layer" claim (an exploratory shallow-necessity observation is quarantined to Limitations) — see
 [Limitations](#limitations--planned-strengthening).
 
 ---
@@ -298,21 +299,35 @@ not, by itself, for a "value-not-token" mechanism (see the H2 note above).
 
 ## Results so far
 
-Status by hypothesis. Runs use the **bug-fixed** helix code (consistent `nmax` normalization; rank-8
-basis). Causal legs: **9 base models, 7 orgs, 3 non-transformer architectures** — Qwen2.5-7B,
-Qwen3-8B, Qwen3-14B, Mistral-Nemo-Base, OLMo-3-7B, EuroLLM-9B, Granite-4-h-tiny (Mamba-2/MoE),
-Falcon-H1-7B (parallel hybrid), Nemotron-Nano-12B (Mamba-2 hybrid); Aya-23-8B is instruct →
-representational. All causal results carry **bootstrap 95% CIs + paired significance** (`analyze_stats.py`).
+> **⚠ Results status (read before citing any number).** The codebase was overhauled in three audit
+> rounds (`schema_version` 2.1). Divide results into three buckets:
+> 1. **Validated, direction-robust:** graded H2 ordering (language least-shared); helix present +
+>    cross-form span overlap in all families incl. 3 hybrids; sufficiency *sign* (subspace steers,
+>    matched-random doesn't) reproduced on a live model via delta transport.
+> 2. **Implemented, not yet rerun:** matched-arithmetic delta transport + delta interchange,
+>    per-case norm-matched necessity controls, rank-aware overlap, cluster CIs. These change
+>    magnitudes and cell counts vs. the pre-overhaul numbers.
+> 3. **Pre-overhaul, MUST be regenerated:** every effect-size and the exact **"45/45"** counts below
+>    (legacy reconstruction transport + legacy carrier interchange + un-normalized controls, schema
+>    1.x). Treat them as *placeholders showing the shape of the result*, not final values.
+>
+> The next full run (all outputs stamped `schema_version 2.1`) replaces bucket 3.
+
+Status by hypothesis. Causal legs: **9 base models, 7 orgs, 3 non-transformer architectures** —
+Qwen2.5-7B, Qwen3-8B, Qwen3-14B, Mistral-Nemo-Base, OLMo-3-7B, EuroLLM-9B, Granite-4-h-tiny
+(Mamba-2/MoE), Falcon-H1-7B (parallel hybrid), Nemotron-Nano-12B (Mamba-2 hybrid); Aya-23-8B is
+instruct → representational. Causal results carry **bootstrap 95% CIs + paired permutation tests +
+BH-FDR** (`analyze_stats.py`).
 
 | leg | result | status |
 |---|---|---|
-| **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all models |
+| **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all models (validated) |
 | **exposure-dependent** script sharing | cross-script sharing 0.51→0.83, tracks (multi)script training | ✅ (Aya a caveat) |
-| **architecture-independence** | helix + transport in **3 Mamba/hybrid** models | ✅ Granite-4, Falcon-H1, Nemotron |
+| **replication across families** | helix + transport in **3 Mamba/hybrid** families (not "architecture-independent") | ✅ Granite-4, Falcon-H1, Nemotron |
 | **mechanistic** localization | sharing peaks in a band, then collapses; peak layer family-specific | ✅ all |
-| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ **45/45 cells sig** (95% CI) |
-| **H3** matched-source interchange | real activation, subspace-only ≫ norm-matched random | ✅ **45/45 cells sig** |
-| **H3** causal *necessity* | ablation drops accuracy helix-specifically | ◐ **script-biased, shallower than sharing**; strong vs random null (~80% script cells), weaker vs structured |
+| **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ sign robust; **counts pending rerun** (was 45/45) |
+| **H3** delta interchange | real matched-arithmetic Δ steers ≫ norm-matched random | ◐ new estimand, **pending rerun** |
+| **H3** causal *necessity* | norm-matched ablation drops accuracy helix-specifically | ◐ **script-biased**; strong vs random null, weaker vs structured; **pending rerun** |
 
 > Note on models: the causal arithmetic readout needs a **base** model (instruct Aya scores
 > `clean_acc` ≈ 0 — a readout limitation, not a negative). Granite-4 & Falcon-H1 (native-`transformers`
@@ -323,15 +338,15 @@ representational. All causal results carry **bootstrap 95% CIs + paired signific
 | claim | status |
 |---|---|
 | Fourier number geometry appears across the tested forms | **supported** (9 models, incl. 3 Mamba/hybrid) |
-| Helix subspaces align above an isotropic random floor | **supported** |
+| Helix subspaces align above the **pipeline-matched permutation null** (primary; Haar floor is a secondary reference) | **supported** |
 | `language` is the least-shared axis (clean word-to-word contrasts) | **replicated** (all models) |
 | `script ≈ notation` (relative order) | **model-dependent** (Qwen3 script>notation; OLMo notation>script) |
 | Cross-**script** sharing tracks (multi)script training exposure | **supported, tentative** (0.51→0.83; Aya a caveat) |
 | Helix + transport in **non-transformers** (Mamba/hybrid) | **supported** (Granite-4, Falcon-H1, Nemotron) |
-| Cross-form helix intervention steers restricted digit-choice logits | **supported, universal** (45/45 cells, 95% CI excludes 0) |
-| Steering survives **isotropic + norm-matched + matched-source** controls | **supported** (interchange 45/45); covariance/sensitivity-matched **done** via structured nulls |
-| The shared subspace is *naturally necessary* | **script-biased & depth-dependent**: strong vs random null (~80% interpretable script cells), partly redundant vs structured null; language largely undefined (floor clean-acc) |
-| Value is *read* earlier than it is shared | **suggestive**: necessity peaks shallower (L1–L7) than sharing (L14–L24), but *no* formal read-layer claim |
+| Cross-form helix intervention steers restricted digit-choice logits | **sign robust; exact counts pending rerun** (new delta estimand) |
+| Steering survives isotropic + norm-matched + matched-source controls | top-PCA-span + shuffled-pipeline controls **implemented**; **downstream-sensitivity-matched** sufficiency/interchange controls **open** |
+| The shared subspace is *naturally necessary* | **script-biased**: stronger vs random null than vs structured null; language largely undefined (floor clean-acc); norm-matched controls, **pending rerun** |
+| Value is *read* earlier than it is shared | **not claimed**; a shallow-necessity observation exists but is exploratory only (Limitations) — no path-patching / receiver localization done |
 | Geometry explains behavioral numeracy gaps | **model-dependent, weak** (r 0.06→0.96 across models; frequency-confounded) |
 
 The rest of this section elaborates each row; all headings/claims below are scoped to match it.
@@ -400,13 +415,14 @@ subspace `mean_shift` vs the random control:
 
 Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
 words and Devanagari digits — **the shared subspace is sufficient to drive the answer regardless of
-surface form** — while an equal-dimension random subspace does essentially nothing. Across the
-9-model overnight run this is **universal: 45/45 model×form cells significant** (bootstrap 95% CI
-excludes 0), on transformers *and* the three Mamba/hybrid models. It holds against a **norm-matched**
-random control (`run_necessity.py` matched-source interchange, also **45/45**: real activation,
-subspace-only ≫ norm-matched random) — so the effect is the *specific helix directions*, not just "a
-large enough perturbation." Effect *magnitudes* are not cross-model comparable (different readout
-scales, e.g. OLMo ~5 logits vs Falcon ~0.1); significance is the claim.
+surface form** — while an equal-dimension random subspace does essentially nothing. In the
+pre-overhaul 9-model run this held for **every** model×form cell; those exact counts (e.g. "45/45")
+and the magnitudes in the table above are **legacy (schema 1.x) and pending regeneration** under the
+corrected fit + delta estimand. The *sign* is robust and reproduces on a live model via delta
+transport, against a **norm-matched** random control (matched-arithmetic **delta interchange** in
+`run_necessity.py`, all seeds norm-matched) — so the effect is the *specific helix directions*, not
+just "a large enough perturbation." Effect *magnitudes* are not cross-model comparable (different
+readout scales); significance is the claim.
 
 > Scope: this passes **isotropic**, **norm-matched**, and **matched-source** (real-activation
 > interchange) controls, and the necessity legs add covariance-matched + shuffled-Fourier structured
@@ -433,9 +449,13 @@ run (bootstrap 95% CIs, `analyze_stats.py`):
 
 **1. Multi-token forms must be ablated over the *whole span*, not the last token.** Number-words are
 1.5–2 tokens; ablating only the last fragment leaves most of the value intact (last-token language
-"necessity" is indistinguishable from the matched nulls; whole-span makes it measurable). All causal
-legs use `--intervention-pos span`. Ablating the token *after* the number does ~nothing (clean
-negative control).
+"necessity" is indistinguishable from the matched nulls; whole-span makes it measurable). The
+**primary single-layer necessity ablation** uses `--intervention-pos span`; the other causal
+experiments use their explicitly specified positions (transport/interchange inject at the source
+token; the ablation sweep is last-token). Ablating the token *after* the number does ~nothing (clean
+negative control). The ablation baseline is now the form's own arithmetic mean **conditioned on token
+count + relative position**, and control ablations are **per-case norm-matched** to the helix's
+removed energy.
 
 **2. The null you pick sets the strength of the claim.** Necessity is strong against a *random*
 subspace and much weaker against a *matched structured* one:
@@ -514,8 +534,9 @@ reported as robustness checks.
 1. **Interpretability illusion** ([Makelov et al., 2311.17030](https://arxiv.org/abs/2311.17030)):
    a subspace patch can change behavior via a *dormant parallel pathway* even if it isn't the
    model's real mechanism. The step-3 controls in `src/patching.py` (isotropic + norm-matched +
-   covariance-matched + shuffled-Fourier) *mitigate* this — but isotropic controls alone don't settle
-   it; covariance/sensitivity-matched *interchange* controls are still pending. Necessity helps.
+   top-PCA-span + shuffled-Fourier) *mitigate* this. Scoped honestly: **top-PCA-span and
+   shuffled-pipeline controls are implemented; downstream-sensitivity-matched sufficiency/interchange
+   controls remain open.** Necessity (norm-matched ablation) helps close the gap.
 2. **Tokenization confounds** — *checked (see Preliminary findings)*: `37` vs `thirty-seven` vs
    `३७` follow different token paths and BPE shreds multi-digit strings. Verified the H2 result
    is robust to the readout via `--pooling {last,mean,prompt_last}`; `mean`-over-span is primary.
@@ -599,9 +620,28 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
   now defaults to `structure_*.json` clean contrasts and warns on the confounded `align_*.json` path);
   ✅ **`top_pca_span_basis` rename (#14)** (alias kept); ✅ **"read-layer" language removed from the
   sweep (#15)** → "ablation-sensitivity peak".
-- ☐ **Open (need new data / decisions):** carrier-language factorial (#16); position/token-count-conditioned
-  ablation baselines + post-span & joint-span interventions (#9/#10); preregistered causal-layer selection;
-  full continuation-likelihood / word-form output readouts; coordinate-level bootstrap CIs + cross-prediction (#5).
+**Round 3 (pipeline-consistency audit) — all code items addressed:**
+- ✅ **Schema versioning (#1).** Every output stamps `schema_version` (now `2.1`); README splits results
+  into validated / implemented-not-rerun / pre-overhaul-regenerate so estimands can't be silently mixed.
+- ✅ **Legacy interchange replaced (#2).** `run_necessity.py` now does **matched-arithmetic delta
+  interchange** (real en Δ, all control seeds norm-matched) — the old absolute carrier target `en_real[a']`
+  is gone.
+- ✅ **Norm-matched necessity controls + per-seed saved (#3).** Ablation controls remove the *same
+  energy* as the helix per case (`norm_matched_ablation`); `controls_by_seed` retained (not just the mean).
+- ✅ **Position-conditioned ablation baseline (#4/#9).** `form_arith` mean is now keyed by
+  (token-count, relative position). Post-span / joint-span comparisons remain ☐ open.
+- ✅ **Sweeps marked STALE (#5).** `run_layer_sweep` + `run_transport_sweep` print a not-for-headline
+  banner and stamp `"stale": true`; `run_ablation_sweep` peak controls are now norm-matched.
+- ✅ **Rank-aware overlap propagated (#6)** into `run_structure` (`clean_contrasts_rank_penalized`,
+  `form_ranks`); ✅ **permutation null is the primary H1 baseline (#7)** (Haar floor = secondary reference).
+- ✅ **Case keys everywhere (#8).** transport / necessity / interchange / sweep-peak log per-case keys;
+  `analyze_stats` clusters by source value for all of them.
+- ✅ **Test suite hardened (#9), 15→25 tests.** Fixed broadcast-noise helper; Procrustes now tests
+  rotation recovery; added a true axis-relabeling test (span ~1 while coordinate cosines drop);
+  norm-match/ablation tests call the **real** helpers; added clean-H2-aggregation + FDR-on-perm tests.
+- ☐ **Open (need new data / decisions):** carrier-language factorial (#16); post-span & joint-span
+  interventions; preregistered causal-layer selection; continuation-likelihood / word-form readouts;
+  coordinate-level bootstrap CIs + no-rotation cross-prediction; downstream-sensitivity-matched controls.
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
@@ -620,7 +660,7 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
 - [x] **External-review hardening**: bug fixes; matched controls; multi-token interventions; held-out splits; committed result JSONs; **read-layer claim dropped**
 - [x] **Family expansion → 9 base causal models / 7 orgs / 3 non-transformers**: + Qwen3-14B, EuroLLM-9B, Falcon-H1-7B (parallel hybrid), Nemotron-Nano-12B (Mamba-2 hybrid) → the **exposure-dependent script-sharing** + **architecture-independence** threads
 - [x] **Statistics infrastructure**: per-case logging in all causal legs + `analyze_stats.py` (bootstrap 95% CIs, paired significance, forest plot) + `run_overnight.sh` (unattended full-model loop, per-model cache cleanup)
-- [x] **9-model overnight run**: sufficiency **45/45** + interchange **45/45** significant; necessity script-biased & shallower than sharing (see H3 necessity)
+- [x] **9-model overnight run (pre-overhaul, schema 1.x)**: sufficiency + interchange significant everywhere, necessity script-biased — *magnitudes/counts superseded by the corrected estimands; awaiting the schema-2.1 rerun*
 - [x] **Per-layer structured nulls**: `run_ablation_sweep` now tests helix vs cov-matched + shuffled-Fourier **at the necessity peak** (held-out CIs) → `necessity_peak` claim in `analyze_stats`
 - [ ] **Re-run the overnight loop** to populate `necessity_peak` (structured-null-at-peak) across all 9 models; then finalize the necessity claim at its strongest depth
 - [ ] **Gemma-4** (multimodal-loader verify) + **Universality — Llama-3.1-8B (base)** (blocked on HF gated-repo approval; the original helix model)

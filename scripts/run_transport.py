@@ -38,7 +38,7 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
-    make_patched_vector, patch_residual, assert_hook_equivalence,
+    make_patched_vector, patch_residual, assert_hook_equivalence, subspace_delta, norm_match,
 )
 
 MODES = ["full", "subspace", "random"]
@@ -186,7 +186,7 @@ def main():
             # subspaces (audit #3), so "does it steer" is not confounded by "it perturbs more/less".
             if args.delta and (a, b) in en_arith and (ap, b) in en_arith:
                 diff = en_arith[(ap, b)] - en_arith[(a, b)]         # h_en(a',b) - h_en(a,b)
-                dvec_h = Q @ (Q.T @ diff)                           # helix-subspace value displacement
+                dvec_h = subspace_delta(diff, Q)                    # helix-subspace value displacement
                 nh = np.linalg.norm(dvec_h)
 
                 def shift_of(new_h):
@@ -204,10 +204,7 @@ def main():
                 per_mode["delta"]["shift"].append(sh); per_mode["delta"]["flip"].append(fl); per_mode["delta"]["n"] += 1
                 ctrl_sh = []
                 for Qc in Q_rand_bank:
-                    dc = Qc @ (Qc.T @ diff)
-                    ncn = np.linalg.norm(dc)
-                    if ncn > 1e-8:
-                        dc = dc * (nh / ncn)                        # NORM-MATCH to the helix delta
+                    dc = norm_match(subspace_delta(diff, Qc), nh)  # NORM-MATCH to the helix delta
                     ctrl_sh.append(shift_of(h_orig + dc)[0])
                 per_mode["delta_rand"]["shift"].append(float(np.mean(ctrl_sh)))
                 per_mode["delta_rand"]["flip"].append(0); per_mode["delta_rand"]["n"] += 1
@@ -249,7 +246,8 @@ def main():
     print("en_digit (within-form) should be strongest. flip is a strict lower bound (helix R^2~0.5 =>")
     print("partial reconstruction -> shift moves the answer without always flipping the argmax).\n")
 
-    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
+    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
+           "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
            "delta_ctrl_seeds": args.delta_ctrl_seeds, "results": results}
     tag = args.model.split("/")[-1]

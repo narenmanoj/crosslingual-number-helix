@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 """Layer sweep: where in the network is the number helix SHARED across forms?
 
+⚠ STALE / EXPLORATORY (audit r3 #5) -- NOT FOR HEADLINE. This sweep still compares every form to
+en_digit (so its language curve mixes notation+language, the reference confound the clean contrasts
+in run_structure.py fix), uses in-sample R^2, reports only mean principal cosine (no rank-aware
+overlap), and has no pipeline-matched permutation null. Use it to LOCATE the sharing band; do not
+cite per-layer H2 values or "clean H2 holds at every layer" from it. The authoritative H2 numbers
+come from run_structure.py (clean contrasts + rank-aware overlap) at the chosen layer.
+
 Extracts activations once (all layers come free from output_hidden_states), then fits the
-helix and computes cross-form alignment at EVERY layer. Produces subspace_cos-vs-layer curves
-per axis (script/notation/language) plus the helix-R^2 profile, so you can see the layer band
-where cross-form sharing peaks -- which is where you'd site the step-3 causal transport.
+helix and computes cross-form alignment at EVERY layer, so you can see the layer band where
+cross-form sharing peaks -- which is where you'd site the step-3 causal transport.
 
 Usage:
     python scripts/run_layer_sweep.py --model Qwen/Qwen2.5-7B --pooling mean
@@ -58,6 +64,8 @@ def main():
     if ref not in forms:
         forms = [ref] + forms
 
+    print("\n⚠ STALE/EXPLORATORY sweep (en_digit-reference, in-sample R^2, mean_cos only) -- locate the "
+          "band, but cite H2 from run_structure.py clean contrasts, not per-layer values here.")
     print(f"\nModel: {args.model} | pooling: {args.pooling}")
     model, tok, device = load_model(args.model, args.device)
     d_model = model.config.hidden_size
@@ -148,7 +156,8 @@ def main():
     png = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model_revision": model_revision(model, args.model), "model": args.model, "pooling": args.pooling, "reference": ref,
+    out = {"schema_version": C.SCHEMA_VERSION, "stale": True, "stale_reason": "en_digit-reference contrast; in-sample R^2; mean_cos only; no perm null (audit r3 #5)",
+           "model_revision": model_revision(model, args.model), "model": args.model, "pooling": args.pooling, "reference": ref,
            "n_numbers": len(numbers), "d_model": d_model, "n_layers": n_layers,
            "random_subspace_floor": floor, "best_layer": best["layer"], "per_layer": per_layer}
     js = os.path.join(args.out_dir, f"sweep_{tag}_{args.pooling}.json")

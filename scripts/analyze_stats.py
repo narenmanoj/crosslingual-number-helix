@@ -185,13 +185,15 @@ def main():
         for form, A in d.get("ablation", {}).items():
             pc = A.get("per_case")
             if pc and args.null in pc.get("controls", {}):
+                g = [k[0] for k in pc["keys"]] if pc.get("keys") else None   # source value a
                 add_row(rows, "necessity", tag, form, A.get("axis", axis_of(form)),
-                        paired(pc["controls"][args.null], pc["helix"]), args.b)
+                        paired(pc["controls"][args.null], pc["helix"]), args.b, groups=g)
         for form, I in d.get("interchange", {}).items():
             pc = I.get("per_case")
             if pc:
+                g = [k[0] for k in pc["keys"]] if pc.get("keys") else None
                 add_row(rows, "interchange", tag, form, I.get("axis", axis_of(form)),
-                        paired(pc["subspace"], pc["matched_random"]), args.b)
+                        paired(pc["subspace"], pc["matched_random"]), args.b, groups=g)
 
     # ---------- necessity @ peak layer, vs the STRUCTURED null (strong claim; from the sweep) ----------
     for f in sorted(glob.glob(os.path.join(args.out_dir, "ablation_sweep_*.json"))):
@@ -202,7 +204,8 @@ def main():
         for form, C in d.get("curves", {}).items():
             ps = C.get("heldout_peak_structured", {}).get(args.null)
             if ps and "per_case" in ps:
-                add_row(rows, "necessity_peak", tag, form, axis_of(form), np.array(ps["per_case"], float), args.b)
+                g = [k[0] for k in ps["keys"]] if ps.get("keys") else None    # source value a
+                add_row(rows, "necessity_peak", tag, form, axis_of(form), np.array(ps["per_case"], float), args.b, groups=g)
 
     if not rows:
         print("No per-case data found. Re-run run_transport/run_necessity (they save per_case).")

@@ -1,5 +1,13 @@
 """Default experiment configuration. Override any of these on the CLI."""
 
+# Bump on any change to an estimand / control / intervention so pre- and post-change result JSONs are
+# never silently aggregated (audit r3 #1). Every output file stamps `schema_version`.
+#   1.x = pre-overhaul (centering bug, reconstruction transport, legacy interchange, unmatched controls)
+#   2.0 = post round-2 (centered fit, delta transport, fail-fast tokens, hook asserts, FDR-on-perm)
+#   2.1 = post round-3 (norm-matched necessity controls + per-seed, delta interchange, case keys,
+#         rank-aware overlap propagated, schema versioning, sweeps marked stale)
+SCHEMA_VERSION = "2.1"
+
 # Base models are cleaner for number geometry than chat-tuned ones. The causal legs need BASE
 # models (instruct models score ~0 clean_acc on "a + b = "); the representational legs (H2 +
 # layer sweep) also run on instruct models.

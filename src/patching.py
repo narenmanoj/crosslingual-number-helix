@@ -228,3 +228,27 @@ def matched_injection(h_orig: np.ndarray, target_vec: np.ndarray,
     if nc > 1e-8:
         d_ctrl = d_ctrl * (np.linalg.norm(d_sig) / nc)
     return h_orig + d_ctrl
+
+
+def norm_match(vec: np.ndarray, target_norm: float) -> np.ndarray:
+    """Rescale `vec` to have L2 norm `target_norm` (no-op if `vec` is ~0). The single place norm-matching
+    happens, so run_transport delta controls and the tests exercise the SAME code (audit r3 #9)."""
+    vec = np.asarray(vec, dtype=float)
+    n = np.linalg.norm(vec)
+    return vec * (target_norm / n) if n > 1e-8 else vec
+
+
+def subspace_delta(diff: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    """Value displacement projected onto subspace Q: QQ^T diff (the delta-transport signal / control)."""
+    return _proj(Q, np.asarray(diff, dtype=float))
+
+
+def norm_matched_ablation(h: np.ndarray, mean: np.ndarray,
+                          Q_signal: np.ndarray, Q_control: np.ndarray) -> np.ndarray:
+    """Mean-ablate the Q_control subspace, but scaled so the REMOVED energy equals the helix
+    (Q_signal) removed energy for this token (audit r3 #3). Removes ||QsQs^T(h-mean)|| worth of the
+    control direction, so a control's effect can't be smaller merely because it removes less energy."""
+    h, mean = np.asarray(h, float), np.asarray(mean, float)
+    rs = _proj(Q_signal, h - mean)                      # helix removed vector
+    rc = _proj(Q_control, h - mean)                     # control removed vector
+    return h - norm_match(rc, np.linalg.norm(rs))       # ablate the control, energy-matched to helix

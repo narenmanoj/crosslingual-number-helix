@@ -35,7 +35,7 @@ from src import data as D
 from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
                          continuation_answer_ids)
 from src.helix import fit_helix
-from src.alignment import subspace_alignment, random_subspace_floor
+from src.alignment import subspace_alignment, random_subspace_floor, subspace_overlap
 
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
 
@@ -152,6 +152,16 @@ def main():
         vals = [M[idx[ref], idx[t]] for t in targets if t in idx and t != ref]
         return float(np.mean(vals)) if vals else float("nan")
 
+    # rank-aware overlap (audit r3 #6): mean_cos ignores unmatched dimensions, so a rank-deficient
+    # form can score high. Report rank-penalized overlap ||Qa^T Qb||_F^2 / max(r_a, r_b) too.
+    def mean_overlap(ref, targets):
+        vals = [subspace_overlap(fits[ref]["helix_dirs_model"], fits[t]["helix_dirs_model"])["overlap_rank_penalized"]
+                for t in targets if t in idx and t != ref]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    form_ranks = {f: int(subspace_overlap(fits[f]["helix_dirs_model"], fits[f]["helix_dirs_model"])["rank_a"])
+                  for f in forms}
+
     scripts = [f for f in forms if D.FORMS[f].axis == "script"]        # en_digit + digit-scripts
     notation = [f for f in forms if D.FORMS[f].axis == "notation"]     # en_word
     langs = [f for f in forms if D.FORMS[f].axis == "language"]        # es/fr/de words
@@ -159,6 +169,11 @@ def main():
         "script (en_digit <-> digit-scripts)": mean_cell("en_digit", [f for f in scripts if f != "en_digit"]),
         "notation (en_digit <-> en_word)": mean_cell("en_digit", notation),
         "language (en_word <-> foreign words)": mean_cell("en_word", langs) if "en_word" in idx else float("nan"),
+    }
+    clean_contrasts_rank_penalized = {
+        "script": mean_overlap("en_digit", [f for f in scripts if f != "en_digit"]),
+        "notation": mean_overlap("en_digit", notation),
+        "language": mean_overlap("en_word", langs) if "en_word" in idx else float("nan"),
     }
     # direct word-to-word cells reviewers asked to see
     def cell(a, b):
@@ -220,14 +235,15 @@ def main():
     sc = os.path.join(args.out_dir, f"geombehav_{tag}_L{layer}.png")
     fig2.savefig(sc, dpi=130)
 
-    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
-           "forms": forms, "pairwise_subspace_cos": M.tolist(),
+    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
+           "forms": forms, "pairwise_subspace_cos": M.tolist(), "form_ranks": form_ranks,
            # audit #8: this file is the AUTHORITATIVE H2 source. Its clean_contrasts use the correct
            # reference per axis; the everything-vs-en_digit axis_summary in align_*.json is confounded.
            "contrast_definition": {"script": "en_digit_vs_other_digit_scripts",
                                     "notation": "en_digit_vs_en_word",
                                     "language": "en_word_vs_foreign_words"},
-           "clean_contrasts": clean_contrasts, "word_to_word_cells": word_cells,
+           "clean_contrasts": clean_contrasts,
+           "clean_contrasts_rank_penalized": clean_contrasts_rank_penalized, "word_to_word_cells": word_cells,
            "share_vs_en_digit": share, "arithmetic_acc": acc,
            "geometry_behavior": {"pearson_r": float(pear[0]), "pearson_p": float(pear[1]),
                                  "spearman_r": float(spear[0]), "n": len(corr_forms)},

@@ -45,7 +45,7 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
 from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
-    make_patched_vector, patch_residual, subspace_energy, assert_hook_equivalence,
+    make_patched_vector, norm_matched_ablation, patch_residual, subspace_energy, assert_hook_equivalence,
 )
 
 STRUCT_NULLS = ["cov_matched", "shuf_fourier"]  # structured nulls evaluated at the necessity peak
@@ -197,6 +197,7 @@ def main():
             }
             null_case = {c: [] for c in null_bases}          # per held-out case, acc mean over null seeds
             helix_test = [float(helix_c[Lpk][i]) for i in test]
+            peak_keys = [used_cases[i] for i in test]        # (a, b) per held-out case (audit r3 #8)
             for i in test:
                 a, b = used_cases[i]
                 a_str = D.FORMS[form].render(a)
@@ -205,14 +206,15 @@ def main():
                 _, hidden = forward_logits(model, tok, device, prompt, want_hidden=True)
                 h_orig = hidden[Lpk][pos]
                 for c, bases in null_bases.items():
+                    # NORM-MATCHED ablation: control removes the same energy as the helix (audit r3 #3)
                     ok = [patched_correct(model, tok, device, prompt, Lpk - 1, pos,
-                                          make_patched_vector(h_orig, mean_L[Lpk], Q=Qn, mode="subspace"),
+                                          norm_matched_ablation(h_orig, mean_L[Lpk], Q_signal=Q_L[Lpk], Q_control=Qn),
                                           ans_ids, args.max_sum, a + b) for Qn in bases]
                     null_case[c].append(float(np.mean(ok)))
             for c in null_bases:
                 diff = [null_case[c][j] - helix_test[j] for j in range(len(test))]  # null_acc - helix_acc
                 est, lo, hi, p = boot_paired(diff, seed=args.seed)
-                peak_struct[c] = {"delta": est, "ci": [lo, hi], "p": p, "per_case": diff}
+                peak_struct[c] = {"delta": est, "ci": [lo, hi], "p": p, "per_case": diff, "keys": peak_keys}
 
         curves[form] = {"clean": float(np.mean(clean_c)), "helix": helix_acc, "rand": rand_acc,
                         "rand_std": rand_std, "delta": delta_full, "removed_energy": energy,
@@ -254,9 +256,10 @@ def main():
     png = os.path.join(args.out_dir, f"ablation_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model_revision": model_revision(model, args.model), "layers": sweep_layers, "r": r,
-           "forms": args.forms, "n_seeds": args.n_seeds, "null_seeds": args.null_seeds,
-           "structured_nulls": args.structured_nulls,
+    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
+           "layers": sweep_layers, "r": r, "forms": args.forms, "n_seeds": args.n_seeds,
+           "null_seeds": args.null_seeds, "structured_nulls": args.structured_nulls,
+           "structured_nulls_norm_matched": True,
            "hook_rel_error": hook_err, "ablation_baseline": "carrier_fit_mean",
            "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")

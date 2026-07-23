@@ -165,6 +165,7 @@ def main():
 
     # --- save ---
     result = {
+        "schema_version": C.SCHEMA_VERSION,
         "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model,
         "r2": r2s, "r2_heldout": r2ho, "r2_shuffled": shuf, "random_subspace_floor": floor,

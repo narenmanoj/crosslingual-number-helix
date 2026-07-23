@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """Does the CAUSAL transport effect peak where the CORRELATIONAL sharing peaks?
 
-Runs the step-3 subspace transport at every layer and plots subspace mean_shift vs layer per
-source form (with the random-subspace control). If a matching correlational layer-sweep JSON
-(sweep_{tag}_{pooling}.json) exists, it's overlaid on top so you can see whether the causal peak
-tracks the subspace_cos peak -- the result that unifies the mechanistic (step 2) and causal
-(step 3) stories, and explains why the transport layer differs by model (Qwen mid, Aya late).
+⚠ STALE / EXPLORATORY (audit r3 #5) -- NOT FOR HEADLINE. This sweep still uses the pre-audit design:
+absolute RECONSTRUCTED targets (not matched-arithmetic delta), a single UN-matched random subspace,
+no per-case statistics, and a `subspace/full` normalization whose denominator is itself a
+context-mismatched intervention (so it does not cleanly remove propagation-depth effects). Use the
+single-layer run_transport.py (delta transport, norm-matched controls, CIs) for causal claims; treat
+this only as a qualitative "does the causal effect track the sharing band" picture.
 
-Only subspace + random modes are swept (subspace = the claim, random = the illusion control);
-`full` is uniform and uninformative across layers. Cost = cases x layers x 2 forward passes.
+Only subspace + random modes are swept. Cost = cases x layers x 2 forward passes.
 
 Usage:
     python scripts/run_transport_sweep.py --model Qwen/Qwen2.5-7B
@@ -186,7 +186,8 @@ def main():
     png = os.path.join(args.out_dir, f"transport_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"model_revision": model_revision(model, args.model), "model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
+    out = {"schema_version": C.SCHEMA_VERSION, "stale": True, "stale_reason": "reconstructed targets; unmatched single random control; no per-case stats (audit r3 #5)",
+           "model_revision": model_revision(model, args.model), "model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
            "curves": curves, "frac_subspace_over_full": frac,
            "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}
     js = os.path.join(args.out_dir, f"transport_sweep_{tag}.json")
