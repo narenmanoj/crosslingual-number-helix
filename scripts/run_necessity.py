@@ -37,7 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
+from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
+                         validate_single_token_answers)
 from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
@@ -53,6 +54,9 @@ def parse_args():
     p.add_argument("--forms", nargs="+", default=["en_digit", "devanagari_digit", "es_word", "fr_word"])
     p.add_argument("--layer", type=int, default=14)
     p.add_argument("--intervention-pos", default="last", choices=["last", "span", "after"])
+    p.add_argument("--ablation-baseline", default="form_arith", choices=["form_arith", "carrier"],
+                   help="mean-ablation target: 'form_arith' = this form's OWN arithmetic-context mean "
+                        "(context-matched, audit #12); 'carrier' = the en_digit fit mean (legacy)")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9)
     p.add_argument("--pairs-per-form", type=int, default=40)
@@ -127,7 +131,10 @@ def main():
         "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + i) for i in range(args.n_seeds)],
     }
     ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
-    print(f"en_digit helix @ L{args.layer}: R^2={fit['r2']:.3f}, r={r}\n")
+    bad_ans = validate_single_token_answers(tok, range(0, args.max_sum + 1))  # audit #9
+    if bad_ans:
+        print(f"  WARN: {len(bad_ans)} answer value(s) not clean single tokens: {bad_ans[:5]} -> readout may be unreliable")
+    print(f"en_digit helix @ L{args.layer}: R^2={fit['r2']:.3f}, r={r} | ablation baseline={args.ablation_baseline}\n")
 
     def argmax_ans(logits):
         return int(np.argmax([logits[ans_ids[v]] for v in range(0, args.max_sum + 1)]))
@@ -147,6 +154,24 @@ def main():
     ablation, interchange = {}, {}
     for form in args.forms:
         # ---------- (A) ABLATION ----------
+        # Context-matched baseline (audit #12): pull the value-subspace toward THIS form's own
+        # arithmetic-context mean, so the intervention removes value while preserving the form/carrier
+        # offset -- rather than dragging it toward the en_digit "The number n is" carrier mean.
+        if args.ablation_baseline == "form_arith":
+            vecs = []
+            for (a, b) in ab_cases:
+                a_str = D.FORMS[form].render(a)
+                prompt = f"{a_str} + {b} = "
+                try:
+                    idxs = _number_token_indices(tok, prompt, a_str)
+                except ValueError:
+                    continue
+                _, hid, sl = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
+                vecs.extend(hid[p] for p in intervention_positions(idxs, args.intervention_pos, sl))
+            mean_vec_form = np.mean(vecs, axis=0) if vecs else mean_vec
+        else:
+            mean_vec_form = mean_vec
+
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
         energy = {"helix": []} | {c: [] for c in CONTROLS}
@@ -166,19 +191,20 @@ def main():
             n += 1
             tok_counts.append(len(idxs))
             cc = int(argmax_ans(Lc) == a + b); clean_ok += cc; clean_case.append(cc)
-            # helix ablation (mean-ablate the helix subspace at each chosen position)
-            p2v = {p: make_patched_vector(hidden[p], mean_vec, Q=Q, mode="subspace") for p in positions}
+            # helix ablation (mean-ablate the helix subspace at each chosen position, toward the
+            # context-matched baseline mean_vec_form)
+            p2v = {p: make_patched_vector(hidden[p], mean_vec_form, Q=Q, mode="subspace") for p in positions}
             hc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
             helix_ok += hc; helix_case.append(hc)
             # WHOLE-SPAN removed energy: sqrt(sum_p ||QQ^T(h_p - mean)||^2) over ALL patched positions
             # (not just the last token), so the reported energy matches what the intervention removes.
-            span_energy = lambda Qb: float(np.sqrt(sum(subspace_energy(Qb, hidden[p], mean_vec) ** 2
+            span_energy = lambda Qb: float(np.sqrt(sum(subspace_energy(Qb, hidden[p], mean_vec_form) ** 2
                                                        for p in positions)))
             energy["helix"].append(span_energy(Q))
             for c in CONTROLS:
                 seed_correct = []
                 for si, Qc in enumerate(ctrl_bases[c]):
-                    p2v = {p: make_patched_vector(hidden[p], mean_vec, Q=Qc, mode="subspace") for p in positions}
+                    p2v = {p: make_patched_vector(hidden[p], mean_vec_form, Q=Qc, mode="subspace") for p in positions}
                     sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
                     ctrl_ok[c][si] += sc; seed_correct.append(sc)
                 ctrl_case[c].append(float(np.mean(seed_correct)))

@@ -76,6 +76,27 @@ def _number_token_indices(tok, text: str, number_str: str) -> list[int]:
     return idxs
 
 
+def validate_single_token_answers(tok, values, prompt: str = "3 + 4 = ") -> list:
+    """Audit #9: verify each candidate answer is a SINGLE continuation token after the real prompt
+    ending and decodes to the intended digit. The causal readout takes argmax over these token ids;
+    a bad id (byte fragment, SentencePiece metaspace, or a multi-token answer) silently corrupts
+    clean_acc and every shift. Returns [(value, reason), ...] for values that FAIL, so the caller can
+    warn or drop the model from the single-token task. Empty list => the readout is clean."""
+    base = tok(prompt, add_special_tokens=True)["input_ids"]
+    bad = []
+    for v in values:
+        full = tok(prompt + str(v), add_special_tokens=True)["input_ids"]
+        if full[:len(base)] != base:
+            bad.append((v, "prompt is not a token-prefix after appending the answer (retokenization)"))
+            continue
+        cont = full[len(base):]
+        if len(cont) != 1:
+            bad.append((v, f"answer is {len(cont)} continuation tokens, not 1"))
+        elif tok.decode(cont).strip() != str(v):
+            bad.append((v, f"answer token decodes to {tok.decode(cont)!r}, not {v!r}"))
+    return bad
+
+
 @torch.no_grad()
 def extract_form_activations(
     model,

@@ -25,9 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
 from src import data as D
 from src.extract import load_model, extract_form_activations, model_revision
-from src.helix import fit_helix, shuffled_control_r2
+from src.helix import fit_helix, shuffled_control_r2, heldout_r2
 from src.alignment import (
     subspace_alignment, linear_cka, random_subspace_floor, orthogonal_procrustes_cv,
+    canonical_map_cosines, permutation_alignment_null,
 )
 
 
@@ -89,11 +90,12 @@ def main():
         print(f"\nUsing layer: {layer}")
 
     # --- fit helix per form at the chosen layer ---
-    fits, r2s, shuf = {}, {}, {}
+    fits, r2s, r2ho, shuf = {}, {}, {}, {}
     for f in forms:
         H = acts_by_form[f][layer]
         fits[f] = fit_helix(H, numbers, k_pca=args.k_pca)
         r2s[f] = fits[f]["r2"]
+        r2ho[f] = heldout_r2(H, numbers, k_pca=args.k_pca)[0]     # audit #7: honest generalization R^2
         shuf[f] = shuffled_control_r2(H, numbers, k_pca=args.k_pca)
 
     # --- alignment vs reference ---
@@ -108,29 +110,34 @@ def main():
         sa = subspace_alignment(ref_dirs, fits[f]["helix_dirs_model"])
         cka = linear_cka(ref_H, acts_by_form[f][layer])
         proc = orthogonal_procrustes_cv(ref_H, acts_by_form[f][layer])
-        rows.append((f, D.FORMS[f].axis, sa["mean_cos"], cka, proc))
+        coord = canonical_map_cosines(fits[ref], fits[f])         # audit #1: coordinate-level identity
+        perm = permutation_alignment_null(ref_H, acts_by_form[f][layer], numbers, k_pca=args.k_pca)
+        rows.append((f, D.FORMS[f].axis, sa["mean_cos"], cka, proc,
+                     coord["mean_abs_cos"], coord["mean_signed_cos"], perm["null_q95"]))
 
     # --- report ---
     print("\n" + "=" * 74)
     print(f"HELIX FIT QUALITY (layer {layer})   [R^2; shuffled-label control should be ~0]")
     print("-" * 74)
-    print(f"  {'form':<20}{'axis':<10}{'R^2':>10}{'R^2(shuffled)':>18}")
+    print(f"  {'form':<20}{'axis':<10}{'R^2':>8}{'R^2(held-out)':>15}{'R^2(shuffled)':>15}")
     for f in forms:
-        print(f"  {f:<20}{D.FORMS[f].axis:<10}{r2s[f]:>10.3f}{shuf[f]:>18.3f}")
+        print(f"  {f:<20}{D.FORMS[f].axis:<10}{r2s[f]:>8.3f}{r2ho[f]:>15.3f}{shuf[f]:>15.3f}")
+    print("  (held-out R^2 = fit on train numbers, scored on held-out numbers; shuffled should be ~0)")
 
-    print("\n" + "=" * 86)
+    print("\n" + "=" * 108)
     print(f"CROSS-FORM ALIGNMENT vs reference '{ref}'")
-    print(f"  random-subspace floor (subspace_cos): {floor:.3f}   <- subspace_cos must beat this")
-    print("-" * 86)
-    print(f"  {'form':<20}{'axis':<10}{'subspace_cos':>14}{'procrustes_cv':>16}{'linear_CKA':>14}")
-    for f, axis, mc, cka, proc in rows:
-        print(f"  {f:<20}{axis:<10}{mc:>14.3f}{proc:>16.3f}{cka:>14.3f}")
-    print("=" * 86)
+    print(f"  random floor (subspace_cos): {floor:.3f}; perm_q95 = pipeline-matched null (audit #7) -- subspace_cos must beat it")
+    print("  coord_|cos| / coord_scos = coordinate-level identity (audit #1): does each Fourier feature point the SAME way?")
+    print("-" * 108)
+    print(f"  {'form':<18}{'axis':<9}{'subspace_cos':>13}{'perm_q95':>10}{'coord_|cos|':>12}{'coord_scos':>11}{'procrustes':>11}{'CKA':>8}")
+    for f, axis, mc, cka, proc, cabs, cscos, permq in rows:
+        print(f"  {f:<18}{axis:<9}{mc:>13.3f}{permq:>10.3f}{cabs:>12.3f}{cscos:>11.3f}{proc:>11.3f}{cka:>8.3f}")
+    print("=" * 108)
 
     # --- per-axis summary: the headline H2 contrast (script vs notation vs language) ---
     axis_summary = {}
     for axis in ["script", "notation", "language"]:
-        vals = [(mc, proc, cka) for _, a, mc, cka, proc in rows if a == axis]
+        vals = [(mc, proc, cka, cabs) for _, a, mc, cka, proc, cabs, cscos, permq in rows if a == axis]
         if vals:
             arr = np.array(vals)
             axis_summary[axis] = {
@@ -138,12 +145,14 @@ def main():
                 "subspace_cos": float(arr[:, 0].mean()),
                 "procrustes_cv": float(arr[:, 1].mean()),
                 "linear_cka": float(arr[:, 2].mean()),
+                "coord_abs_cos": float(arr[:, 3].mean()),
             }
     print("\nPER-AXIS MEANS (H2: value-driven sharing => script >= notation >= language)")
-    print("-" * 86)
-    print(f"  {'axis':<12}{'n':>4}{'subspace_cos':>16}{'procrustes_cv':>16}{'linear_CKA':>14}")
+    print("-" * 90)
+    print(f"  {'axis':<12}{'n':>4}{'subspace_cos':>16}{'coord_|cos|':>14}{'procrustes_cv':>16}{'linear_CKA':>14}")
     for axis, s in axis_summary.items():
-        print(f"  {axis:<12}{s['n']:>4}{s['subspace_cos']:>16.3f}{s['procrustes_cv']:>16.3f}{s['linear_cka']:>14.3f}")
+        print(f"  {axis:<12}{s['n']:>4}{s['subspace_cos']:>16.3f}{s['coord_abs_cos']:>14.3f}"
+              f"{s['procrustes_cv']:>16.3f}{s['linear_cka']:>14.3f}")
     print(f"  {'floor':<12}{'':>4}{floor:>16.3f}")
     print("=" * 86)
 
@@ -158,12 +167,13 @@ def main():
     result = {
         "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model,
-        "r2": r2s, "r2_shuffled": shuf, "random_subspace_floor": floor,
+        "r2": r2s, "r2_heldout": r2ho, "r2_shuffled": shuf, "random_subspace_floor": floor,
         "axis_summary": axis_summary,
         "alignment": [
             {"form": f, "axis": axis, "subspace_mean_cos": mc,
-             "procrustes_cv_r2": proc, "linear_cka": cka}
-            for f, axis, mc, cka, proc in rows
+             "procrustes_cv_r2": proc, "linear_cka": cka,
+             "coord_abs_cos": cabs, "coord_signed_cos": cscos, "perm_null_q95": permq}
+            for f, axis, mc, cka, proc, cabs, cscos, permq in rows
         ],
     }
     tag = args.model.split("/")[-1]

@@ -64,6 +64,49 @@ def random_subspace_floor(dirs_ref: np.ndarray, d_model: int, n_trials: int = 20
     return float(np.mean(vals))
 
 
+def canonical_map_cosines(fit_a: dict, fit_b: dict) -> dict:
+    """Coordinate-level identity (audit #1): signed cosine between CORRESPONDING Fourier-feature
+    directions of two forms, not just span overlap. `fit['helix_dirs_model']` is [n_features, d_model]:
+    row i is the model-space direction that Fourier feature i (e.g. cos(2*pi*n/10)) regresses onto.
+
+    subspace_alignment reports whether the two forms share a SPAN; a rotation R of the 8 features can
+    make that ~1 while individual coordinates differ. This asks the stronger question: does feature i
+    point the SAME way in both forms? Returns per-feature signed cosine, mean|cos| ('same axis') and
+    mean signed cos ('same direction'). Both forms must use the same periods (they do by default)."""
+    Da = np.asarray(fit_a["helix_dirs_model"], float)
+    Db = np.asarray(fit_b["helix_dirs_model"], float)
+    if Da.shape != Db.shape:
+        raise ValueError("forms must share the same Fourier basis (periods) to compare coordinates")
+    cos = []
+    for i in range(Da.shape[0]):
+        na, nb = np.linalg.norm(Da[i]), np.linalg.norm(Db[i])
+        cos.append(float(Da[i] @ Db[i] / (na * nb)) if na > 1e-12 and nb > 1e-12 else 0.0)
+    return {"per_feature_cos": cos,
+            "mean_abs_cos": float(np.mean(np.abs(cos))),      # ~1 => same axes (up to sign)
+            "mean_signed_cos": float(np.mean(cos))}           # ~1 => same directions
+
+
+def permutation_alignment_null(H_a: np.ndarray, H_b: np.ndarray, numbers,
+                               n_perm: int = 50, k_pca: int = 20, seed: int = 0) -> dict:
+    """Pipeline-matched null for cross-form subspace overlap (audit #7). Independently permute the
+    number labels for EACH form, run the WHOLE PCA+Fourier fit, measure subspace_cos, repeat. This
+    asks whether the observed overlap exceeds what the same pipeline yields from shared activation
+    covariance + fit capacity alone (a much stronger null than isotropic random subspaces). Returns
+    null mean/std/q95 of the mean principal cosine."""
+    from src.helix import fit_helix
+    rng = np.random.default_rng(seed)
+    nums = list(numbers)
+    vals = []
+    for _ in range(n_perm):
+        pa, pb = list(nums), list(nums)
+        rng.shuffle(pa); rng.shuffle(pb)
+        fa = fit_helix(np.asarray(H_a, float), pa, k_pca=k_pca)
+        fb = fit_helix(np.asarray(H_b, float), pb, k_pca=k_pca)
+        vals.append(subspace_alignment(fa["helix_dirs_model"], fb["helix_dirs_model"])["mean_cos"])
+    return {"null_mean": float(np.mean(vals)), "null_std": float(np.std(vals)),
+            "null_q95": float(np.percentile(vals, 95))}
+
+
 def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 12,
                              train_frac: float = 0.8, seed: int = 0) -> float:
     """Held-out R^2 of the best ROTATION aligning form X's geometry onto form Y's.

@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
+from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
+                         validate_single_token_answers)
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
@@ -41,6 +42,13 @@ from src.patching import (
 )
 
 MODES = ["full", "subspace", "random"]
+# Delta transport (audit #2): instead of REPLACING the subspace component with a reconstruction
+# (which also imports form/carrier/context offset), ADD only the matched-arithmetic value DISPLACEMENT
+#   h_B(a,b)  ->  h_B(a,b) + QQ^T ( h_en(a',b) - h_en(a,b) )
+# from two English-DIGIT arithmetic prompts at the same position. This holds addend, syntax, output
+# format, and form/context offset fixed and transports only the a->a' change. delta_rand = same with
+# a random subspace (control). This is the decisive value-transport test.
+DELTA_MODES = ["delta", "delta_rand"]
 
 
 def parse_args():
@@ -54,6 +62,9 @@ def parse_args():
     p.add_argument("--pairs-per-form", type=int, default=80, help="raise for tighter CIs (cap ~all valid triples)")
     p.add_argument("--fit-max", type=int, default=99, help="fit the en_digit helix on 0..fit_max")
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
+    p.add_argument("--delta", dest="delta", action="store_true", default=True,
+                   help="also run matched-arithmetic DELTA transport (audit #2; the decisive value test)")
+    p.add_argument("--no-delta", dest="delta", action="store_false")
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
@@ -109,6 +120,10 @@ def main():
     recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a'
     ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
     ans_id_list = [ans_ids[v] for v in range(0, args.max_sum + 1)]
+    bad_ans = validate_single_token_answers(tok, range(0, args.max_sum + 1))  # audit #9
+    if bad_ans:
+        print(f"  WARN: {len(bad_ans)} answer value(s) are not clean single tokens for this model: "
+              f"{bad_ans[:5]}{'...' if len(bad_ans) > 5 else ''}\n  -> restricted digit-choice readout may be unreliable here.")
 
     def argmax_answer(logits):
         sub = np.array([logits[ans_ids[v]] for v in range(0, args.max_sum + 1)])
@@ -126,9 +141,24 @@ def main():
     rng.shuffle(cases)
     cases = cases[: args.pairs_per_form]
 
+    # --- delta transport cache: en_digit ARITHMETIC activation h_en(v,b) for every (v,b) we need ---
+    all_modes = MODES + (DELTA_MODES if args.delta else [])
+    en_arith = {}
+    if args.delta:
+        for (v, b) in {(a, b) for (a, ap, b) in cases} | {(ap, b) for (a, ap, b) in cases}:
+            vs = str(v)
+            eprompt = f"{vs} + {b} = "
+            try:
+                epos = _number_token_indices(tok, eprompt, vs)[-1]
+            except ValueError:
+                continue
+            _, eh, _ = logits_last(model, tok, device, eprompt, want_hidden=True, layer=args.layer)
+            en_arith[(v, b)] = eh[epos]
+        print(f"delta transport: cached {len(en_arith)} en_digit arithmetic activations")
+
     results = {}
     for form in args.forms:
-        per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in MODES}
+        per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in all_modes}
         clean_correct = 0
         n_proc = 0  # cases that survived token-span identification (the honest denominator)
         for (a, ap, b) in cases:
@@ -162,6 +192,25 @@ def main():
                 per_mode[mode]["flip"].append(flip)
                 per_mode[mode]["n"] += 1
 
+            # --- delta transport: add ONLY the matched-arithmetic value displacement (audit #2) ---
+            if args.delta and (a, b) in en_arith and (ap, b) in en_arith:
+                diff = en_arith[(ap, b)] - en_arith[(a, b)]         # h_en(a',b) - h_en(a,b)
+                for dmode, Qd in (("delta", Q), ("delta_rand", Q_rand)):
+                    dvec = Qd @ (Qd.T @ diff)                       # project onto (helix | random) subspace
+                    new_h = h_orig + dvec
+                    handle = patch_residual(model, hook_layer, pos,
+                                            torch.tensor(new_h, dtype=torch.float32, device=device))
+                    try:
+                        Lp, _, _ = logits_last(model, tok, device, prompt)
+                    finally:
+                        handle.remove()
+                    shift = ((Lp[ans_ids[ap + b]] - Lp[ans_ids[a + b]])
+                             - (Lc[ans_ids[ap + b]] - Lc[ans_ids[a + b]]))
+                    flip = int(argmax_answer(Lc) == (a + b) and argmax_answer(Lp) == (ap + b))
+                    per_mode[dmode]["shift"].append(float(shift))
+                    per_mode[dmode]["flip"].append(flip)
+                    per_mode[dmode]["n"] += 1
+
         n = max(n_proc, 1)
         results[form] = {
             "axis": D.FORMS[form].axis,
@@ -171,9 +220,9 @@ def main():
                           "pos_shift_rate": float(np.mean([s > 0 for s in per_mode[m]["shift"]])) if per_mode[m]["shift"] else float("nan"),
                           "flip_rate": float(np.mean(per_mode[m]["flip"])) if per_mode[m]["flip"] else float("nan"),
                           "n": per_mode[m]["n"]}
-                      for m in MODES},
+                      for m in all_modes},
             # per-case arrays (aligned across modes) for bootstrap CIs + paired significance tests
-            "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in MODES},
+            "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in all_modes},
         }
 
     # --- report (long format: one row per form x mode) ---
@@ -181,10 +230,11 @@ def main():
     print(f"CAUSAL TRANSPORT  (en_digit helix @ L{args.layer}, r={r})")
     print("  primary = mean_shift (logits toward a'+b) & pos_rate; random mode is the illusion control")
     print("-" * 82)
+    print("  delta/delta_rand = matched-arithmetic value transport (audit #2): delta >> delta_rand => value is portable")
     print(f"  {'source form':<20}{'axis':<9}{'mode':<10}{'clean_acc':>10}{'mean_shift':>12}{'pos_rate':>10}{'flip':>7}")
     for form in args.forms:
         R = results[form]
-        for m in MODES:
+        for m in all_modes:
             M = R["modes"][m]
             print(f"  {form:<20}{R['axis']:<9}{m:<10}{R['clean_acc']:>10.2f}"
                   f"{M['mean_shift']:>12.3f}{M['pos_shift_rate']:>10.2f}{M['flip_rate']:>7.2f}")

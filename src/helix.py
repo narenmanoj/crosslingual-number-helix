@@ -87,3 +87,36 @@ def shuffled_control_r2(H, numbers, seed=0, **kw) -> float:
     shuffled = list(numbers)
     rng.shuffle(shuffled)
     return fit_helix(H, shuffled, **kw)["r2"]
+
+
+def heldout_r2(H, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20,
+               train_frac: float = 0.7, n_splits: int = 5, seed: int = 0):
+    """Honest generalization R^2 (audit #7): fit PCA + the centered Fourier map on a TRAIN subset of
+    numbers, evaluate reconstruction in the k-PCA space on HELD-OUT numbers, averaged over n_splits.
+
+    In-sample R^2 (fit_helix) is optimistic with ~100 points and ~8 features; this measures whether
+    the helix predicts activations for numbers it was NOT fit on. Evaluated in the same k-PCA space as
+    the reported R^2 so the two are comparable. Returns (mean, std)."""
+    H = np.asarray(H, dtype=float)
+    nums = np.asarray(numbers, dtype=float)
+    n = len(nums)
+    nmax = max(float(nums.max()), 1.0)
+    B = fourier_basis(nums, periods, nmax=nmax)
+    rng = np.random.default_rng(seed)
+    scores = []
+    for _ in range(n_splits):
+        idx = rng.permutation(n)
+        ntr = max(int(train_frac * n), 2)
+        tr, te = idx[:ntr], idx[ntr:]
+        if len(te) < 2:
+            continue
+        k = min(k_pca, len(tr) - 1, H.shape[1])
+        pca = PCA(n_components=k, svd_solver="full").fit(H[tr])  # PCA on TRAIN activations only
+        Ztr, Zte = pca.transform(H[tr]), pca.transform(H[te])
+        Bmean = B[tr].mean(axis=0, keepdims=True)               # center by TRAIN
+        W, *_ = np.linalg.lstsq(B[tr] - Bmean, Ztr, rcond=None)
+        Zte_hat = (B[te] - Bmean) @ W
+        ss_res = ((Zte - Zte_hat) ** 2).sum()
+        ss_tot = ((Zte - Ztr.mean(0)) ** 2).sum()               # null = predict train-mean score
+        scores.append(1 - ss_res / ss_tot if ss_tot > 0 else 0.0)
+    return (float(np.mean(scores)), float(np.std(scores))) if scores else (float("nan"), float("nan"))
