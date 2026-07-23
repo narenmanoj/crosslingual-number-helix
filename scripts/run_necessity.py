@@ -38,11 +38,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
 from src import data as D
 from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
-                         validate_single_token_answers)
+                         continuation_answer_ids)
 from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
-    make_patched_vector, matched_injection, subspace_energy, patch_residual_multi,
+    make_patched_vector, matched_injection, subspace_energy, patch_residual_multi, assert_hook_equivalence,
 )
 
 CONTROLS = ["random", "cov_matched", "shuf_fourier"]
@@ -67,14 +67,6 @@ def parse_args():
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
-
-
-def answer_token_id(tok, v):
-    for s in (f"{v}", f" {v}"):
-        ids = tok.encode(s, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 @torch.no_grad()
@@ -115,6 +107,8 @@ def main():
     print(f"\nModel: {args.model} | layer {args.layer} | intervention-pos {args.intervention_pos}")
     model, tok, device = load_model(args.model, args.device)
     d_model = model.config.hidden_size
+    hook_err = assert_hook_equivalence(model, tok, device, hook_layer)  # audit #4: fail-fast, saved to JSON
+    print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}")
 
     fit_numbers = list(range(0, args.fit_max + 1))
     acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers), pooling="last")
@@ -130,10 +124,7 @@ def main():
         "cov_matched": [covariance_matched_basis(HL, r, seed=args.seed + i) for i in range(args.n_seeds)],
         "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + i) for i in range(args.n_seeds)],
     }
-    ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
-    bad_ans = validate_single_token_answers(tok, range(0, args.max_sum + 1))  # audit #9
-    if bad_ans:
-        print(f"  WARN: {len(bad_ans)} answer value(s) not clean single tokens: {bad_ans[:5]} -> readout may be unreliable")
+    ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
     print(f"en_digit helix @ L{args.layer}: R^2={fit['r2']:.3f}, r={r} | ablation baseline={args.ablation_baseline}\n")
 
     def argmax_ans(logits):
@@ -281,6 +272,7 @@ def main():
 
     out = {"model_revision": model_revision(model, args.model), "layer": args.layer,
            "intervention_pos": args.intervention_pos, "r": r, "n_seeds": args.n_seeds,
+           "ablation_baseline": args.ablation_baseline, "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}
     tag = args.model.split("/")[-1]

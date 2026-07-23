@@ -1,15 +1,19 @@
 #!/usr/bin/env python
-"""Ablation-LAYER sweep: WHERE (if anywhere) does the model rely on the shared helix subspace?
+"""Ablation-LAYER sweep: layerwise ablation SENSITIVITY of the shared helix subspace.
 
-run_necessity.py ablates at a single layer (the representational sharing peak). But a model may
-*read* the number value at a different depth than where the value is most *shared*, so a single-
-layer null (as on Mistral-Nemo @ L22) is ambiguous: genuine redundancy, or just the wrong layer?
+run_necessity.py ablates at a single layer (the representational sharing peak). But the depth at
+which ablating the subspace most hurts arithmetic need not equal the depth where it is most *shared*,
+so a single-layer null (as on Mistral-Nemo @ L22) is ambiguous: genuine redundancy, or just an
+insensitive layer? This sweep maps sensitivity across depth.
 
-This sweep resolves it. At every layer L it mean-ablates the en_digit-helix subspace from a source
-number inside "a + b = " and measures the arithmetic-accuracy DROP, vs a multi-seed random-subspace
-ablation. Read the per-form curve of Delta = acc(random-ablate) - acc(helix-ablate) vs layer:
-  - a PEAK at some layer  => the model DOES rely on the shared subspace, read at that depth
-                             (necessity is real, just localized -- report where each model reads)
+At every layer L it mean-ablates the en_digit-helix subspace from a source number inside "a + b = "
+and measures the arithmetic-accuracy DROP, vs a multi-seed random-subspace ablation. The per-form
+curve Delta = acc(random-ablate) - acc(helix-ablate) vs layer:
+  - a PEAK at some layer  => an ablation-SENSITIVITY peak (a candidate vulnerability depth): helix
+                             ablation hurts more than random there. This is NOT a "read layer" --
+                             raw peaks are confounded by propagation depth + removed energy, so we
+                             report only the discovery/test held-out Delta and never claim where the
+                             model "reads" the value (that needs path patching / receiver tracing).
   - FLAT ~0 at all layers => genuine redundancy: value is distributed, subspace is bypassable
 
 Overlays the correlational sweep_{tag}_mean.json if present, so you can see whether the necessity
@@ -36,11 +40,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
+from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
+                         continuation_answer_ids)
 from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
-    make_patched_vector, patch_residual, subspace_energy,
+    make_patched_vector, patch_residual, subspace_energy, assert_hook_equivalence,
 )
 
 STRUCT_NULLS = ["cov_matched", "shuf_fourier"]  # structured nulls evaluated at the necessity peak
@@ -69,14 +74,6 @@ def parse_args():
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
-
-
-def answer_token_id(tok, v):
-    for s in (f"{v}", f" {v}"):
-        ids = tok.encode(s, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 def boot_paired(diff, B=10000, seed=0, alpha=0.05):
@@ -122,6 +119,9 @@ def main():
     d_model = model.config.hidden_size
     n_layers = model.config.num_hidden_layers
     sweep_layers = list(range(1, n_layers + 1, args.layer_stride))
+    # audit #4: the hooking convention is architecture-level; verify it once at a mid swept layer.
+    hook_err = assert_hook_equivalence(model, tok, device, sweep_layers[len(sweep_layers) // 2] - 1)
+    print(f"hook-equivalence rel-error (mid layer): {hook_err:.2e}")
 
     fit_numbers = list(range(0, args.fit_max + 1))
     acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers),
@@ -132,7 +132,7 @@ def main():
         fitL[L], Q_L[L], mean_L[L] = f, helix_subspace_basis(f), f["mean"]
     r = Q_L[sweep_layers[0]].shape[1]
     Q_rands = [random_subspace_basis(r, d_model, seed=args.seed + i) for i in range(args.n_seeds)]
-    ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
+    ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
     print(f"Device: {device} | d_model {d_model} | sweeping {len(sweep_layers)} layers | r={r}\n")
 
     rng = np.random.default_rng(args.seed)
@@ -240,7 +240,7 @@ def main():
             ys = [pl["axis_summary"].get(ax_name, {}).get("subspace_cos", np.nan) for pl in corr["per_layer"]]
             axes[0].plot(cl, ys, lw=2, marker="o", ms=2, label=f"{ax_name} (corr.)")
         axes[0].set_ylabel("subspace_cos\n(correlational)")
-        axes[0].set_title(f"{tag}: sharing peak vs where the model RELIES on the shared subspace")
+        axes[0].set_title(f"{tag}: sharing peak vs layerwise ablation sensitivity")
         axes[0].grid(alpha=0.25); axes[0].legend(fontsize=8)
     axc = axes[-1]
     for f in args.forms:
@@ -257,6 +257,7 @@ def main():
     out = {"model_revision": model_revision(model, args.model), "layers": sweep_layers, "r": r,
            "forms": args.forms, "n_seeds": args.n_seeds, "null_seeds": args.null_seeds,
            "structured_nulls": args.structured_nulls,
+           "hook_rel_error": hook_err, "ablation_baseline": "carrier_fit_mean",
            "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")
     with open(js, "w") as fh:

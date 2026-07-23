@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
+from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
+                         continuation_answer_ids)
 from src.helix import fit_helix
 from src.alignment import subspace_alignment, random_subspace_floor
 
@@ -54,14 +55,6 @@ def parse_args():
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
     return p.parse_args()
-
-
-def answer_token_id(tok, v):
-    for s in (f"{v}", f" {v}"):
-        ids = tok.encode(s, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 @torch.no_grad()
@@ -122,7 +115,7 @@ def main():
             M[i, j] = M[j, i] = c
 
     # ---------- (#7) arithmetic accuracy per form ----------
-    ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
+    ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast
     acc = {}
     for f in forms:
         a, n = arithmetic_accuracy(model, tok, device, f, args.acc_addends, args.max_sum, ans_ids)
@@ -229,6 +222,11 @@ def main():
 
     out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(),
+           # audit #8: this file is the AUTHORITATIVE H2 source. Its clean_contrasts use the correct
+           # reference per axis; the everything-vs-en_digit axis_summary in align_*.json is confounded.
+           "contrast_definition": {"script": "en_digit_vs_other_digit_scripts",
+                                    "notation": "en_digit_vs_en_word",
+                                    "language": "en_word_vs_foreign_words"},
            "clean_contrasts": clean_contrasts, "word_to_word_cells": word_cells,
            "share_vs_en_digit": share, "arithmetic_acc": acc,
            "geometry_behavior": {"pearson_r": float(pear[0]), "pearson_p": float(pear[1]),

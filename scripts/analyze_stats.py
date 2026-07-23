@@ -106,19 +106,51 @@ def axis_of(form):
     return "script"
 
 
-def add_row(rows, claim, tag, form, axis, diff, B):
-    """Paired bootstrap CI + permutation p for one (claim, model, form) cell."""
+def cluster_boot(diff, groups, B, seed=0, alpha=0.05):
+    """Cluster bootstrap by group id (audit #11): arithmetic rows sharing a source value are not
+    independent, so resample GROUPS (source values) with replacement, pool their rows, take the mean.
+    Returns (lo, hi) of the clustered CI, wider than the naive per-case CI. Needs per-case group ids."""
     diff = np.asarray(diff, float)
-    est, lo, hi, p, n = boot(diff, B)
-    rows.append({"claim": claim, "model": tag, "form": form, "axis": axis,
-                 "effect": est, "lo": lo, "hi": hi, "p": p, "perm_p": perm_sign_p(diff, B),
-                 "n": n, "sig_ci": bool(lo > 0 or hi < 0)})
+    groups = np.asarray(groups)
+    uniq = np.unique(groups)
+    if len(uniq) < 2:
+        return (float("nan"), float("nan"))
+    idx_by_g = {g: np.where(groups == g)[0] for g in uniq}
+    rng = np.random.default_rng(seed)
+    means = np.empty(B)
+    for j in range(B):
+        pick = uniq[rng.integers(0, len(uniq), size=len(uniq))]
+        rows_idx = np.concatenate([idx_by_g[g] for g in pick])
+        means[j] = diff[rows_idx].mean()
+    lo, hi = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(lo), float(hi)
+
+
+def add_row(rows, claim, tag, form, axis, diff, B, groups=None):
+    """Paired bootstrap CI + sign-flip permutation p for one (claim, model, form) cell. If per-case
+    source-value groups are given, also a clustered CI. `sig_ci` uses the clustered CI when available
+    (the more conservative interval)."""
+    diff = np.asarray(diff, float)
+    est, lo, hi, boot_tail, n = boot(diff, B)
+    row = {"claim": claim, "model": tag, "form": form, "axis": axis,
+           "effect": est, "lo": lo, "hi": hi, "boot_tail": boot_tail, "perm_p": perm_sign_p(diff, B),
+           "n": n, "sig_ci": bool(lo > 0 or hi < 0)}
+    if groups is not None and len(groups) == len(diff):
+        clo, chi = cluster_boot(diff, groups, B)
+        row["cluster_lo"], row["cluster_hi"] = clo, chi
+        if np.isfinite(clo):
+            row["sig_ci"] = bool(clo > 0 or chi < 0)     # prefer the clustered interval
+    rows.append(row)
 
 
 def paired(a, b):
+    """Element-wise paired difference. ASSERTS equal length (audit #12): the per-case arrays we pair
+    are built in the same loop and must align 1:1 -- a length mismatch means misaligned cases, which
+    should fail loudly, never be silently truncated."""
     a, b = np.asarray(a, float), np.asarray(b, float)
-    m = min(len(a), len(b))
-    return a[:m] - b[:m]
+    if len(a) != len(b):
+        raise ValueError(f"paired arrays misaligned: len {len(a)} != {len(b)} (cases must align 1:1)")
+    return a - b
 
 
 def main():
@@ -131,14 +163,18 @@ def main():
         if not want(tag, args.models):
             continue
         d = json.load(open(f))
+        keys = None
         for form, R in d.get("results", {}).items():
             pc, ax = R.get("per_case_shift"), R.get("axis", axis_of(form))
             if not pc:
                 continue
+            k = R.get("per_case_keys", {})
+            g_modes = [c[0] for c in k["modes"]] if k.get("modes") else None   # source value a per case
+            g_delta = [c[0] for c in k["delta"]] if k.get("delta") else None
             if "subspace" in pc and "random" in pc:
-                add_row(rows, "sufficiency", tag, form, ax, paired(pc["subspace"], pc["random"]), args.b)
+                add_row(rows, "sufficiency", tag, form, ax, paired(pc["subspace"], pc["random"]), args.b, groups=g_modes)
             if "delta" in pc and "delta_rand" in pc and len(pc["delta"]):
-                add_row(rows, "delta_transport", tag, form, ax, paired(pc["delta"], pc["delta_rand"]), args.b)
+                add_row(rows, "delta_transport", tag, form, ax, paired(pc["delta"], pc["delta_rand"]), args.b, groups=g_delta)
 
     # ---------- necessity @ share-layer + matched-source interchange ----------
     for f in sorted(glob.glob(os.path.join(args.out_dir, "necessity_*_span.json"))):
@@ -173,9 +209,11 @@ def main():
         return
 
     # ---------- BH-FDR across cells, PER CLAIM (the multiple-comparisons policy) ----------
+    # Apply FDR to the PERMUTATION p (a proper null-centered test), NOT the bootstrap tail (audit #1).
     for claim in set(r["claim"] for r in rows):
         cr = [r for r in rows if r["claim"] == claim]
-        reject, q = bh_fdr([r["p"] for r in cr], alpha=args.alpha)
+        assert all("perm_p" in r for r in cr)
+        reject, q = bh_fdr([r["perm_p"] for r in cr], alpha=args.alpha)
         for r, rj, qq in zip(cr, reject, q):
             r["q"] = float(qq)
             r["sig_fdr"] = bool(rj)
@@ -186,15 +224,18 @@ def main():
     order = {c: i for i, c in enumerate(CLAIMS)}
     rows.sort(key=lambda r: (order.get(r["claim"], 9), r["model"], r["form"]))
     print("\n" + "=" * 128)
-    print(f"PAIRED TESTS  (B={args.b}; necessity null = {args.null}; FDR alpha = {args.alpha})")
-    print("  effect [95% CI] | boot p (P<=0, 1-sided) | perm p (sign-flip, 2-sided) | q (BH-FDR) | CI sig | FDR sig")
+    print(f"PAIRED TESTS  (B={args.b}; necessity null = {args.null}; FDR alpha = {args.alpha}; FDR uses perm_p)")
+    print("  effect [95% CI, clustered by source value where keys present] | perm p (sign-flip) | q (BH-FDR on perm_p) | CI | FDR")
     print("-" * 128)
     print(f"  {'claim':<16}{'model':<24}{'form':<19}{'axis':<9}{'effect':>8}{'95% CI':>18}"
-          f"{'boot_p':>8}{'perm_p':>8}{'q_fdr':>8}{'CI':>4}{'FDR':>5}{'n':>5}")
+          f"{'boot_tail':>10}{'perm_p':>8}{'q_fdr':>8}{'CI':>4}{'FDR':>5}{'n':>5}")
     for r in rows:
-        ci = f"[{r['lo']:.2f}, {r['hi']:.2f}]"
+        lo, hi = (r.get("cluster_lo"), r.get("cluster_hi"))
+        if lo is None or not np.isfinite(lo):
+            lo, hi = r["lo"], r["hi"]
+        ci = f"[{lo:.2f}, {hi:.2f}]"
         print(f"  {r['claim']:<16}{r['model'][:23]:<24}{r['form']:<19}{r['axis']:<9}{r['effect']:>8.3f}{ci:>18}"
-              f"{r['p']:>8.3f}{r['perm_p']:>8.3f}{r['q']:>8.3f}{flag(r['sig_ci']):>4}{flag(r['sig_fdr']):>5}{r['n']:>5}")
+              f"{r['boot_tail']:>10.3f}{r['perm_p']:>8.3f}{r['q']:>8.3f}{flag(r['sig_ci']):>4}{flag(r['sig_fdr']):>5}{r['n']:>5}")
     print("=" * 128)
 
     # ---------- overall + per-model aggregation ----------
@@ -237,7 +278,10 @@ def main():
         y = np.arange(len(cr))[::-1]
         for yi, r in zip(y, cr):
             col = AXIS_COLORS.get(r["axis"], "#333")
-            ax.plot([r["lo"], r["hi"]], [yi, yi], color=col, lw=1.5, alpha=1 if r["sig_ci"] else 0.4)
+            lo, hi = (r.get("cluster_lo"), r.get("cluster_hi"))
+            if lo is None or not np.isfinite(lo):
+                lo, hi = r["lo"], r["hi"]
+            ax.plot([lo, hi], [yi, yi], color=col, lw=1.5, alpha=1 if r["sig_ci"] else 0.4)
             # filled circle = FDR-significant; open circle = CI-only; x = n.s.
             if r["sig_ci"]:
                 ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="o",

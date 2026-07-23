@@ -83,6 +83,20 @@ def verify_hook_layer(model, tok, device, hook_layer: int, prompt: str = "The nu
     return num / den
 
 
+def assert_hook_equivalence(model, tok, device, hook_layer: int, tol: float = 1e-3) -> float:
+    """FAIL-FAST wrapper around verify_hook_layer (audit #4): raise if the hook point is not the
+    recorded residual state (>tol or non-finite), so a causal run never silently patches a different
+    tensor from the one Q was fit on. Returns the measured rel-error (save it in the output JSON).
+    Every causal script should call this at startup."""
+    err = verify_hook_layer(model, tok, device, hook_layer)
+    if not np.isfinite(err) or err > tol:
+        raise RuntimeError(
+            f"hook mismatch at block {hook_layer}: rel-error={err:.3e} > tol={tol:.0e}. The forward-hook "
+            "output is not hidden_states[L] for this architecture -- patches would hit a different "
+            "representation than the fit. Locate the correct hook point before running causal legs.")
+    return err
+
+
 def patch_residual(model, layer_idx: int, position: int, new_vector: torch.Tensor):
     """Forward hook overwriting the residual stream at (decoder layer_idx, position) with
     new_vector. Returns the handle; call .remove(). To affect hidden_states[L], use layer_idx=L-1."""
@@ -172,14 +186,22 @@ def make_patched_vector(h_orig: np.ndarray, target_vec: np.ndarray,
 #     perturbation norm, so "does it steer" isn't confounded by "it perturbs less".
 # ---------------------------------------------------------------------------
 
-def covariance_matched_basis(H: np.ndarray, r: int, top_k: int = 64, seed: int = 0) -> np.ndarray:
-    """Random r-dim subspace inside the top-k PCA span of activations H (covariance-matched null)."""
+def top_pca_span_basis(H: np.ndarray, r: int, top_k: int = 64, seed: int = 0) -> np.ndarray:
+    """Random r-dim subspace drawn UNIFORMLY inside the top-k PCA span of activations H. This is an
+    activation-manifold / top-PCA-span control: it lands in the high-variance directions but does NOT
+    reproduce the covariance eigenvalue spectrum (audit #14 -- hence the honest name; the JSON key
+    'cov_matched' is retained for continuity but means this). For true covariance matching, weight the
+    coefficients by the PCA eigenvalues before orthogonalization."""
     from sklearn.decomposition import PCA
     H = np.asarray(H, dtype=float)
     k = min(top_k, H.shape[0] - 1, H.shape[1])
     V = PCA(n_components=k, svd_solver="full").fit(H).components_        # [k, d_model] (deterministic)
     rng = np.random.default_rng(seed)
     return orthonormal_basis(rng.standard_normal((r, k)) @ V)
+
+
+# Backward-compatible alias: the function was formerly (mis)named covariance_matched_basis.
+covariance_matched_basis = top_pca_span_basis
 
 
 def shuffled_fourier_basis(H: np.ndarray, numbers, k_pca: int = 20, seed: int = 0) -> np.ndarray:

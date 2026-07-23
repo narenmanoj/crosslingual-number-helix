@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as C
 from src import data as D
-from src.extract import load_model, extract_form_activations, _number_token_indices, model_revision
+from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
+                         continuation_answer_ids)
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
@@ -61,14 +62,6 @@ def parse_args():
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
-
-
-def answer_token_id(tok, v):
-    for s in (f"{v}", f" {v}"):
-        ids = tok.encode(s, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 @torch.no_grad()
@@ -107,7 +100,7 @@ def main():
         recon_L[L] = helix_reconstruct(f, targets)
     r = Q_L[sweep_layers[0]].shape[1]
     Q_rand = random_subspace_basis(r, d_model, seed=args.seed)
-    ans_ids = {v: answer_token_id(tok, v) for v in targets}
+    ans_ids = continuation_answer_ids(tok, targets)  # audit #2/#9: fail-fast
 
     # per (form, layer, mode) accumulators
     data = {form: {L: {m: [] for m in MODES} for L in sweep_layers} for form in args.forms}

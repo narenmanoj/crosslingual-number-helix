@@ -64,6 +64,20 @@ def random_subspace_floor(dirs_ref: np.ndarray, d_model: int, n_trials: int = 20
     return float(np.mean(vals))
 
 
+def subspace_overlap(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:
+    """Rank-aware overlap (audit #6). Principal angles compare only min(r_a, r_b) matched dimensions,
+    so a form fit at rank 4 can score perfectly against a rank-8 form while 4 directions are ignored.
+    With orthonormal Q_a [d, r_a], Q_b [d, r_b], shared energy = ||Q_a^T Q_b||_F^2 (in [0, min(r_a,r_b)]).
+    We report it normalized three ways and always return the ranks."""
+    Qa, Qb = orthonormal_basis(dirs_a), orthonormal_basis(dirs_b)
+    ra, rb = Qa.shape[1], Qb.shape[1]
+    shared = float(np.linalg.norm(Qa.T @ Qb, "fro") ** 2)
+    return {"rank_a": ra, "rank_b": rb, "shared_energy": shared,
+            "overlap_a_to_b": shared / ra if ra else float("nan"),
+            "overlap_b_to_a": shared / rb if rb else float("nan"),
+            "overlap_rank_penalized": shared / max(ra, rb) if max(ra, rb) else float("nan")}
+
+
 def canonical_map_cosines(fit_a: dict, fit_b: dict) -> dict:
     """Coordinate-level identity (audit #1): signed cosine between CORRESPONDING Fourier-feature
     directions of two forms, not just span overlap. `fit['helix_dirs_model']` is [n_features, d_model]:
@@ -86,13 +100,16 @@ def canonical_map_cosines(fit_a: dict, fit_b: dict) -> dict:
             "mean_signed_cos": float(np.mean(cos))}           # ~1 => same directions
 
 
-def permutation_alignment_null(H_a: np.ndarray, H_b: np.ndarray, numbers,
-                               n_perm: int = 50, k_pca: int = 20, seed: int = 0) -> dict:
+def permutation_alignment_null(H_a: np.ndarray, H_b: np.ndarray, numbers, observed: float = None,
+                               n_perm: int = 500, k_pca: int = 20, seed: int = 0) -> dict:
     """Pipeline-matched null for cross-form subspace overlap (audit #7). Independently permute the
     number labels for EACH form, run the WHOLE PCA+Fourier fit, measure subspace_cos, repeat. This
     asks whether the observed overlap exceeds what the same pipeline yields from shared activation
-    covariance + fit capacity alone (a much stronger null than isotropic random subspaces). Returns
-    null mean/std/q95 of the mean principal cosine."""
+    covariance + fit capacity alone (a much stronger null than isotropic random subspaces).
+
+    n_perm defaults to 500 (>=500 for reliable tail estimation; the 95th percentile off 50 samples is
+    determined by ~2 points). If `observed` is given, also returns the add-one permutation p-value
+    p = (1 + #{null >= obs}) / (1 + n_perm). Set/report the seed."""
     from src.helix import fit_helix
     rng = np.random.default_rng(seed)
     nums = list(numbers)
@@ -103,8 +120,12 @@ def permutation_alignment_null(H_a: np.ndarray, H_b: np.ndarray, numbers,
         fa = fit_helix(np.asarray(H_a, float), pa, k_pca=k_pca)
         fb = fit_helix(np.asarray(H_b, float), pb, k_pca=k_pca)
         vals.append(subspace_alignment(fa["helix_dirs_model"], fb["helix_dirs_model"])["mean_cos"])
-    return {"null_mean": float(np.mean(vals)), "null_std": float(np.std(vals)),
-            "null_q95": float(np.percentile(vals, 95))}
+    vals = np.asarray(vals)
+    out = {"n_perm": n_perm, "null_mean": float(vals.mean()), "null_std": float(vals.std()),
+           "null_q95": float(np.percentile(vals, 95))}
+    if observed is not None:
+        out["p"] = float((1 + int(np.sum(vals >= observed))) / (1 + n_perm))
+    return out
 
 
 def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 12,

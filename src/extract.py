@@ -97,6 +97,22 @@ def validate_single_token_answers(tok, values, prompt: str = "3 + 4 = ") -> list
     return bad
 
 
+def continuation_answer_ids(tok, values, prompt: str = "3 + 4 = ") -> dict:
+    """FAIL-FAST answer-token ids (audit #2): derive each value's id from the ACTUAL continuation
+    after `prompt`, asserting it is exactly ONE token that decodes to the value. NO silent last-token
+    fallback -- raises ValueError listing every value that fails, so a model whose digits are not
+    single tokens is omitted from the restricted single-token task rather than scored on a fragment.
+    Returns {value: token_id}. `prompt` should match the readout's real ending ('a + b = ')."""
+    bad = validate_single_token_answers(tok, values, prompt=prompt)
+    if bad:
+        raise ValueError(
+            f"answer tokens are not clean single-token continuations after {prompt!r}: {bad}. "
+            "This model needs full-continuation scoring for the restricted digit readout -- omit it "
+            "from the single-token task (do NOT fall back to the last sub-token).")
+    base = tok(prompt, add_special_tokens=True)["input_ids"]
+    return {v: tok(prompt + str(v), add_special_tokens=True)["input_ids"][len(base):][0] for v in values}
+
+
 @torch.no_grad()
 def extract_form_activations(
     model,

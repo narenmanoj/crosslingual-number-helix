@@ -1,17 +1,16 @@
 #!/usr/bin/env python
-"""Aggregate experiments/align_*.json into one cross-model / cross-pooling comparison.
+"""Aggregate the cross-model H2 table from the AUTHORITATIVE clean contrasts (audit #8).
 
-Reads every point-alignment result (produced by run_fit_and_align.py) and builds:
-  - a printed table of per-axis subspace_cos for each (model, pooling, layer),
-  - a CSV (experiments/summary.csv),
-  - a grouped bar chart (experiments/summary.png) with the random-floor line.
-
-Use this to assemble the H2 story across models once the cluster runs land. It intentionally
-reads only align_*.json (point runs); layer-sweep JSONs are summarized by run_layer_sweep.py.
+By default reads structure_*.json (run_structure.py), whose `clean_contrasts` use the correct
+reference PER AXIS (script = en_digit vs digit-scripts, notation = en_digit vs en_word, language =
+en_word vs foreign words). The `axis_summary` in align_*.json is the everything-vs-en_digit contrast,
+which changes both notation and language and silently reintroduces the reference confound -- so the
+cross-model H2 plot must NOT be built from it. If you point --glob at align_*.json, this script warns
+loudly and labels the output confounded.
 
 Usage:
-    python scripts/aggregate_runs.py
-    python scripts/aggregate_runs.py --out-dir experiments --glob 'align_*.json'
+    python scripts/aggregate_runs.py                              # clean contrasts (structure_*.json)
+    python scripts/aggregate_runs.py --glob 'align_*.json'        # confounded (warned)
 """
 from __future__ import annotations
 
@@ -34,30 +33,51 @@ AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--out-dir", default="experiments")
-    p.add_argument("--glob", default="align_*.json")
+    p.add_argument("--glob", default="structure_*.json", help="authoritative clean-contrast source")
     return p.parse_args()
+
+
+def axis_values(d):
+    """Return {axis: subspace_cos} and a source tag. structure_*.json -> clean contrasts (authoritative);
+    align_*.json -> the confounded everything-vs-en_digit axis_summary."""
+    if "clean_contrasts" in d:                     # structure_*.json (clean, per-axis reference)
+        cc = d["clean_contrasts"]
+
+        def pick(ax):
+            for k, v in cc.items():
+                if k.startswith(ax):
+                    return float(v)
+            return float("nan")
+        return {a: pick(a) for a in AXES}, "clean"
+    ax = d.get("axis_summary", {})                 # align_*.json (confounded)
+    return {a: ax.get(a, {}).get("subspace_cos", float("nan")) for a in AXES}, "confounded"
 
 
 def main():
     args = parse_args()
     files = sorted(glob.glob(os.path.join(args.out_dir, args.glob)))
     if not files:
-        print(f"No files matching {args.glob} in {args.out_dir}/. Run run_fit_and_align.py first.")
+        print(f"No files matching {args.glob} in {args.out_dir}/. Run run_structure.py first "
+              "(or pass --glob 'align_*.json' for the confounded per-form contrasts).")
         sys.exit(0)
 
-    rows = []
+    rows, sources = [], set()
     for fp in files:
         with open(fp) as fh:
             d = json.load(fh)
-        axis = d.get("axis_summary", {})
+        vals, src = axis_values(d)
+        sources.add(src)
         rows.append({
             "model": d.get("model", "?").split("/")[-1],
             "pooling": d.get("pooling", "?"),
             "layer": d.get("layer", "?"),
-            "floor": d.get("random_subspace_floor", float("nan")),
-            "r2_ref": d.get("r2", {}).get(d.get("reference", ""), float("nan")),
-            **{ax: axis.get(ax, {}).get("subspace_cos", float("nan")) for ax in AXES},
+            "floor": d.get("floor", d.get("random_subspace_floor", float("nan"))),
+            "contrast": src,
+            **vals,
         })
+    if "confounded" in sources:
+        print("\n  ⚠ WARNING: aggregating the CONFOUNDED everything-vs-en_digit contrast (align_*.json). "
+              "For the H2 figure use structure_*.json (clean per-axis contrasts) -- see audit #8.\n")
     rows.sort(key=lambda r: (r["model"], str(r["pooling"]), str(r["layer"])))
 
     # --- table ---
@@ -73,7 +93,7 @@ def main():
     # --- csv ---
     csv_path = os.path.join(args.out_dir, "summary.csv")
     with open(csv_path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["model", "pooling", "layer", "floor", "r2_ref", *AXES])
+        w = csv.DictWriter(fh, fieldnames=["model", "pooling", "layer", "floor", "contrast", *AXES])
         w.writeheader()
         w.writerows(rows)
 
@@ -87,8 +107,9 @@ def main():
                label=axis, color=AXIS_COLORS[axis])
     floor = np.nanmean([r["floor"] for r in rows])
     ax.axhline(floor, ls="--", color="#888", lw=1, label=f"random floor (~{floor:.02f})")
-    ax.set_ylabel("subspace_cos (vs en_digit)")
-    ax.set_title("Cross-form number-helix sharing by run")
+    ax.set_ylabel("subspace_cos (clean per-axis contrast)" if "confounded" not in sources
+                  else "subspace_cos (CONFOUNDED vs en_digit)")
+    ax.set_title("Cross-form number-helix sharing (H2)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylim(0, 1)

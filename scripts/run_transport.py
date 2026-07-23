@@ -34,11 +34,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
 from src import data as D
 from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
-                         validate_single_token_answers)
+                         continuation_answer_ids)
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
-    make_patched_vector, patch_residual, verify_hook_layer,
+    make_patched_vector, patch_residual, assert_hook_equivalence,
 )
 
 MODES = ["full", "subspace", "random"]
@@ -65,19 +65,11 @@ def parse_args():
     p.add_argument("--delta", dest="delta", action="store_true", default=True,
                    help="also run matched-arithmetic DELTA transport (audit #2; the decisive value test)")
     p.add_argument("--no-delta", dest="delta", action="store_false")
+    p.add_argument("--delta-ctrl-seeds", type=int, default=10, help="norm-matched random controls per delta case (audit #3)")
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
-
-
-def answer_token_id(tok, v: int) -> int:
-    # prompt ends with "= " (trailing space), so the model emits the BARE digit next.
-    for s in (f"{v}", f" {v}"):
-        ids = tok.encode(s, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return tok.encode(f"{v}", add_special_tokens=False)[-1]  # LAST token = the digit (skip SP metaspace)
 
 
 @torch.no_grad()
@@ -103,9 +95,8 @@ def main():
         raise SystemExit("--layer must be >= 1 (need a decoder block to hook)")
     hook_layer = args.layer - 1  # hidden_states[L] == output of decoder block L-1
     print(f"Device: {device} | d_model: {d_model} | hooking decoder block {hook_layer}")
-    hook_err = verify_hook_layer(model, tok, device, hook_layer)  # audit #4: assumption -> tested
-    flag = "  <-- WARN: hook != recorded hidden state; patches at this layer may be untrustworthy" if hook_err > 1e-3 else ""
-    print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}{flag}\n")
+    hook_err = assert_hook_equivalence(model, tok, device, hook_layer)  # audit #4: fail-fast, saved to JSON
+    print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}\n")
 
     # --- fit the en_digit helix at the target layer (pooling='last' -> a single patchable position) ---
     fit_numbers = list(range(0, args.fit_max + 1))
@@ -117,13 +108,9 @@ def main():
     Q = helix_subspace_basis(fit)                          # [d_model, r]
     r = Q.shape[1]
     Q_rand = random_subspace_basis(r, d_model, seed=args.seed)
+    Q_rand_bank = [random_subspace_basis(r, d_model, seed=args.seed + 1 + i) for i in range(args.delta_ctrl_seeds)]
     recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a'
-    ans_ids = {v: answer_token_id(tok, v) for v in range(0, args.max_sum + 1)}
-    ans_id_list = [ans_ids[v] for v in range(0, args.max_sum + 1)]
-    bad_ans = validate_single_token_answers(tok, range(0, args.max_sum + 1))  # audit #9
-    if bad_ans:
-        print(f"  WARN: {len(bad_ans)} answer value(s) are not clean single tokens for this model: "
-              f"{bad_ans[:5]}{'...' if len(bad_ans) > 5 else ''}\n  -> restricted digit-choice readout may be unreliable here.")
+    ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
 
     def argmax_answer(logits):
         sub = np.array([logits[ans_ids[v]] for v in range(0, args.max_sum + 1)])
@@ -159,6 +146,7 @@ def main():
     results = {}
     for form in args.forms:
         per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in all_modes}
+        case_keys, delta_keys = [], []     # audit #12: (a, a', b) per case, aligned to the per-case arrays
         clean_correct = 0
         n_proc = 0  # cases that survived token-span identification (the honest denominator)
         for (a, ap, b) in cases:
@@ -170,6 +158,7 @@ def main():
                 continue
             pos = idxs[-1]
             n_proc += 1
+            case_keys.append((a, ap, b))
             Lc, hidden, _ = logits_last(model, tok, device, prompt, want_hidden=True, layer=args.layer)
             clean_correct += int(argmax_answer(Lc) == (a + b))
             h_orig = hidden[pos]                              # [d_model]
@@ -193,23 +182,36 @@ def main():
                 per_mode[mode]["n"] += 1
 
             # --- delta transport: add ONLY the matched-arithmetic value displacement (audit #2) ---
+            # control is NORM-MATCHED to the helix delta and averaged over delta_ctrl_seeds random
+            # subspaces (audit #3), so "does it steer" is not confounded by "it perturbs more/less".
             if args.delta and (a, b) in en_arith and (ap, b) in en_arith:
                 diff = en_arith[(ap, b)] - en_arith[(a, b)]         # h_en(a',b) - h_en(a,b)
-                for dmode, Qd in (("delta", Q), ("delta_rand", Q_rand)):
-                    dvec = Qd @ (Qd.T @ diff)                       # project onto (helix | random) subspace
-                    new_h = h_orig + dvec
+                dvec_h = Q @ (Q.T @ diff)                           # helix-subspace value displacement
+                nh = np.linalg.norm(dvec_h)
+
+                def shift_of(new_h):
                     handle = patch_residual(model, hook_layer, pos,
                                             torch.tensor(new_h, dtype=torch.float32, device=device))
                     try:
                         Lp, _, _ = logits_last(model, tok, device, prompt)
                     finally:
                         handle.remove()
-                    shift = ((Lp[ans_ids[ap + b]] - Lp[ans_ids[a + b]])
-                             - (Lc[ans_ids[ap + b]] - Lc[ans_ids[a + b]]))
-                    flip = int(argmax_answer(Lc) == (a + b) and argmax_answer(Lp) == (ap + b))
-                    per_mode[dmode]["shift"].append(float(shift))
-                    per_mode[dmode]["flip"].append(flip)
-                    per_mode[dmode]["n"] += 1
+                    return float((Lp[ans_ids[ap + b]] - Lp[ans_ids[a + b]])
+                                 - (Lc[ans_ids[ap + b]] - Lc[ans_ids[a + b]])), \
+                           int(argmax_answer(Lc) == (a + b) and argmax_answer(Lp) == (ap + b))
+
+                sh, fl = shift_of(h_orig + dvec_h)
+                per_mode["delta"]["shift"].append(sh); per_mode["delta"]["flip"].append(fl); per_mode["delta"]["n"] += 1
+                ctrl_sh = []
+                for Qc in Q_rand_bank:
+                    dc = Qc @ (Qc.T @ diff)
+                    ncn = np.linalg.norm(dc)
+                    if ncn > 1e-8:
+                        dc = dc * (nh / ncn)                        # NORM-MATCH to the helix delta
+                    ctrl_sh.append(shift_of(h_orig + dc)[0])
+                per_mode["delta_rand"]["shift"].append(float(np.mean(ctrl_sh)))
+                per_mode["delta_rand"]["flip"].append(0); per_mode["delta_rand"]["n"] += 1
+                delta_keys.append((a, ap, b))
 
         n = max(n_proc, 1)
         results[form] = {
@@ -223,6 +225,8 @@ def main():
                       for m in all_modes},
             # per-case arrays (aligned across modes) for bootstrap CIs + paired significance tests
             "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in all_modes},
+            # per-case (a, a', b) keys for exact pairing + clustered inference (audit #11/#12)
+            "per_case_keys": {"modes": case_keys, "delta": delta_keys},
         }
 
     # --- report (long format: one row per form x mode) ---
@@ -246,7 +250,8 @@ def main():
     print("partial reconstruction -> shift moves the answer without always flipping the argmax).\n")
 
     out = {"model_revision": model_revision(model, args.model), "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
-           "addends": args.addends, "fit_r2": fit["r2"], "results": results}
+           "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
+           "delta_ctrl_seeds": args.delta_ctrl_seeds, "results": results}
     tag = args.model.split("/")[-1]
     path = os.path.join(args.out_dir, f"transport_{tag}_L{args.layer}.json")
     with open(path, "w") as fh:

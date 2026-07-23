@@ -25,9 +25,12 @@ representational-only; all causal claims now carry **bootstrap 95% CIs + paired 
   (multi)script training — multilingual models (Qwen3 119-lang 0.83, Mistral 0.80, Qwen2.5 0.77,
   Granite 0.76) share strongly; English-primary OLMo-3 is lowest (0.51). (Aya, multilingual but 0.53,
   is a caveat — likely *numeral-script* exposure specifically, not general multilinguality.)
-- **Architecture-independent:** the helix, cross-form sharing, and causal transport all appear in the
-  three **non-transformers** — Granite-4 (hybrid Mamba-2/MoE), Falcon-H1 (parallel hybrid), and
-  Nemotron-Nano (Mamba-2 hybrid) — so the geometry is not a transformer artifact.
+- **Replicated across transformer *and* hybrid families:** the helix, cross-form sharing, and causal
+  transport all appear in the three **non-transformers** — Granite-4 (hybrid Mamba-2/MoE), Falcon-H1
+  (parallel hybrid), and Nemotron-Nano (Mamba-2 hybrid). We say *replicated across the tested
+  transformer and hybrid state-space/attention families* rather than "architecture-independent" — 9
+  checkpoints across 7 orgs are not 9 independent architecture samples (audit #13); report at
+  checkpoint, family, and org granularity.
 - **Causally *sufficient* everywhere — the strong universal claim.** Injecting the shared subspace
   (subspace-only) with a value steers arithmetic for *every* form, while a **norm-matched** random
   subspace does essentially nothing: **45/45 model×form cells significant** (95% CI excludes 0),
@@ -576,9 +579,29 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
   `QQᵀ(h_en(a′,b)−h_en(a,b))` (holds addend/syntax/format/offset fixed); a `delta_transport` claim in `analyze_stats`.
 - ✅ **Held-out helix R² + pipeline-matched permutation null (#7)**; ✅ **context-matched ablation baseline (#12)**
   (`--ablation-baseline form_arith`, now default); ✅ **answer-token validation (#9)** (`validate_single_token_answers`).
-- ✅ **Test suite** (`tests/test_core.py`, 13 tests) locking in the above.
-- ☐ **Open (need new data / decisions):** carrier-language factorial (attribute the language gap to lexicalization
-  vs carrier sentence); preregistered causal-layer selection; full continuation-likelihood / word-form output readouts.
+- ✅ **Test suite** (`tests/test_core.py`, **22 tests**) locking in the above.
+
+**Round 2 (post-overhaul audit) — the "before any rerun" gate, all addressed:**
+- ✅ **FDR now uses `perm_p` (#1).** BH-FDR was applied to the bootstrap tail (not a null-centered p);
+  it now corrects the **sign-flip permutation** p. The bootstrap field is renamed `boot_tail`.
+- ✅ **Fail-fast answer tokens (#2/#9).** `continuation_answer_ids` derives each id from the real
+  continuation after `"a + b = "`, asserts one token that decodes to the digit, and **raises** (no
+  last-sub-token fallback). Wired into all five causal/structure scripts.
+- ✅ **Multi-seed, norm-matched delta controls (#3).** `--delta-ctrl-seeds` (default 10); each control
+  delta is rescaled to `‖QQᵀΔ‖` and averaged, so a bigger effect can't just be a bigger perturbation.
+- ✅ **Hook equivalence enforced everywhere (#4).** `assert_hook_equivalence` (fail-fast) runs at
+  startup in transport / necessity / sweep and the rel-error is saved to each JSON (`hook_rel_error`).
+- ✅ **Exact case pairing + clustered inference (#11/#12).** `paired()` asserts equal length (never
+  truncates); transport logs `per_case_keys`; `analyze_stats` adds a **cluster bootstrap by source
+  value** (wider, independence-aware CI) and uses it for the significance flag when keys are present.
+- ✅ **Rank-aware overlap (#6)** (`subspace_overlap`: shared energy + rank-penalized); ✅ **permutation
+  nulls default 500 + add-one p-value (#7)**; ✅ **clean-contrast H2 aggregation (#8)** (`aggregate_runs`
+  now defaults to `structure_*.json` clean contrasts and warns on the confounded `align_*.json` path);
+  ✅ **`top_pca_span_basis` rename (#14)** (alias kept); ✅ **"read-layer" language removed from the
+  sweep (#15)** → "ablation-sensitivity peak".
+- ☐ **Open (need new data / decisions):** carrier-language factorial (#16); position/token-count-conditioned
+  ablation baselines + post-span & joint-span interventions (#9/#10); preregistered causal-layer selection;
+  full continuation-likelihood / word-form output readouts; coordinate-level bootstrap CIs + cross-prediction (#5).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
