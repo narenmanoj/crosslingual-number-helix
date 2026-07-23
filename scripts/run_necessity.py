@@ -133,10 +133,20 @@ def main():
         return int(np.argmax([logits[ans_ids[v]] for v in range(0, args.max_sum + 1)]))
 
     rng = np.random.default_rng(args.seed)
+    # ONE shared case set per experiment, reused for EVERY form (triples are form-independent), so
+    # cross-form differences are effect differences, not case-composition differences. Ablation cases
+    # are already deterministic; the interchange set is shuffled ONCE here, not per form.
+    ab_cases = [(a, b) for b in args.addends for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
+    ic_cases = []
+    for b in args.addends:
+        vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
+        ic_cases += [(a, ap, b) for a in vals for ap in vals if a != ap]
+    rng.shuffle(ic_cases)
+    ic_cases = ic_cases[: args.pairs_per_form]
+
     ablation, interchange = {}, {}
     for form in args.forms:
         # ---------- (A) ABLATION ----------
-        ab_cases = [(a, b) for b in args.addends for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
         energy = {"helix": []} | {c: [] for c in CONTROLS}
@@ -160,7 +170,11 @@ def main():
             p2v = {p: make_patched_vector(hidden[p], mean_vec, Q=Q, mode="subspace") for p in positions}
             hc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
             helix_ok += hc; helix_case.append(hc)
-            energy["helix"].append(subspace_energy(Q, hidden[positions[-1]], mean_vec))
+            # WHOLE-SPAN removed energy: sqrt(sum_p ||QQ^T(h_p - mean)||^2) over ALL patched positions
+            # (not just the last token), so the reported energy matches what the intervention removes.
+            span_energy = lambda Qb: float(np.sqrt(sum(subspace_energy(Qb, hidden[p], mean_vec) ** 2
+                                                       for p in positions)))
+            energy["helix"].append(span_energy(Q))
             for c in CONTROLS:
                 seed_correct = []
                 for si, Qc in enumerate(ctrl_bases[c]):
@@ -168,7 +182,8 @@ def main():
                     sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
                     ctrl_ok[c][si] += sc; seed_correct.append(sc)
                 ctrl_case[c].append(float(np.mean(seed_correct)))
-                energy[c].append(subspace_energy(ctrl_bases[c][0], hidden[positions[-1]], mean_vec))
+                # energy averaged over ALL control seeds (was: first seed only) and over the whole span
+                energy[c].append(float(np.mean([span_energy(Qc) for Qc in ctrl_bases[c]])))
         n = max(n, 1)
         ablation[form] = {
             "axis": D.FORMS[form].axis, "n": n,
@@ -184,13 +199,7 @@ def main():
             "per_case": {"clean": clean_case, "helix": helix_case, "controls": ctrl_case},
         }
 
-        # ---------- (B) MATCHED-SOURCE INTERCHANGE ----------
-        ic_cases = []
-        for b in args.addends:
-            vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
-            ic_cases += [(a, ap, b) for a in vals for ap in vals if a != ap]
-        rng.shuffle(ic_cases)
-        ic_cases = ic_cases[: args.pairs_per_form]
+        # ---------- (B) MATCHED-SOURCE INTERCHANGE (shared ic_cases, built once above) ----------
         sub_shift, matched_shift = [], []
         for (a, ap, b) in ic_cases:
             a_str = D.FORMS[form].render(a)

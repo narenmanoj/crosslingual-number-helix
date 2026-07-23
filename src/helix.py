@@ -45,13 +45,21 @@ def fit_helix(H: np.ndarray, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20) 
     n = H.shape[0]
     nmax = max(float(np.asarray(numbers, dtype=float).max()), 1.0)
     k = min(k_pca, n - 1, H.shape[1])
-    pca = PCA(n_components=k)
-    Z = pca.fit_transform(H)  # [n, k]
+    pca = PCA(n_components=k, svd_solver="full")  # deterministic: n~100 so full SVD is cheap
+    Z = pca.fit_transform(H)  # [n, k] -- PCA scores are column-centered (zero mean)
     B = fourier_basis(numbers, periods, nmax=nmax)  # [n, d_fourier]
 
-    # least-squares: Z ~ B  =>  W [d_fourier, k]
-    W, *_ = np.linalg.lstsq(B, Z, rcond=None)
-    Z_hat = B @ W
+    # CENTER the design matrix: Z is zero-mean (PCA), but B is not (the linear term n/nmax and some
+    # finite-sample Fourier columns have nonzero mean). Regressing centered Z on an UNcentered B with
+    # no intercept mis-attributes that offset into W, corrupting R^2 and every reconstructed vector.
+    # Centering B makes the intercept implicitly zero (both sides centered). We store B_mean so
+    # reconstruction subtracts the SAME offset (helix_reconstruct in src/patching.py).
+    B_mean = B.mean(axis=0, keepdims=True)  # [1, d_fourier]
+    Bc = B - B_mean
+
+    # least-squares: Z ~ Bc  =>  W [d_fourier, k]
+    W, *_ = np.linalg.lstsq(Bc, Z, rcond=None)
+    Z_hat = Bc @ W
     ss_res = ((Z - Z_hat) ** 2).sum()
     ss_tot = ((Z - Z.mean(0)) ** 2).sum()
     r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
@@ -62,6 +70,7 @@ def fit_helix(H: np.ndarray, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20) 
     return {
         "r2": r2,
         "W": W,
+        "B_mean": B_mean,
         "pca": pca,
         "Z": Z,
         "helix_dirs_model": helix_dirs_model,

@@ -37,7 +37,7 @@ from src.extract import load_model, extract_form_activations, _number_token_indi
 from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
-    make_patched_vector, patch_residual,
+    make_patched_vector, patch_residual, verify_hook_layer,
 )
 
 MODES = ["full", "subspace", "random"]
@@ -91,7 +91,10 @@ def main():
     if args.layer < 1:
         raise SystemExit("--layer must be >= 1 (need a decoder block to hook)")
     hook_layer = args.layer - 1  # hidden_states[L] == output of decoder block L-1
-    print(f"Device: {device} | d_model: {d_model} | hooking decoder block {hook_layer}\n")
+    print(f"Device: {device} | d_model: {d_model} | hooking decoder block {hook_layer}")
+    hook_err = verify_hook_layer(model, tok, device, hook_layer)  # audit #4: assumption -> tested
+    flag = "  <-- WARN: hook != recorded hidden state; patches at this layer may be untrustworthy" if hook_err > 1e-3 else ""
+    print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}{flag}\n")
 
     # --- fit the en_digit helix at the target layer (pooling='last' -> a single patchable position) ---
     fit_numbers = list(range(0, args.fit_max + 1))
@@ -111,19 +114,23 @@ def main():
         sub = np.array([logits[ans_ids[v]] for v in range(0, args.max_sum + 1)])
         return int(sub.argmax())
 
-    # --- build cases per form: (a, a', b), both sums single-token ---
+    # --- build ONE shared case set (a, a', b), reused for EVERY form ---
+    # The triples are form-independent, so building/shuffling them once (not per form) means every
+    # form is scored on the identical cases -> cross-form differences are effect differences, not
+    # case-composition differences.
+    cases = []
+    for b in args.addends:
+        vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
+        pairs = [(a, ap) for a in vals for ap in vals if a != ap]
+        cases += [(a, ap, b) for (a, ap) in pairs]
+    rng.shuffle(cases)
+    cases = cases[: args.pairs_per_form]
+
     results = {}
     for form in args.forms:
-        cases = []
-        for b in args.addends:
-            vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
-            pairs = [(a, ap) for a in vals for ap in vals if a != ap]
-            cases += [(a, ap, b) for (a, ap) in pairs]
-        rng.shuffle(cases)
-        cases = cases[: args.pairs_per_form]
-
         per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in MODES}
         clean_correct = 0
+        n_proc = 0  # cases that survived token-span identification (the honest denominator)
         for (a, ap, b) in cases:
             a_str = D.FORMS[form].render(a)
             prompt = f"{a_str} + {b} = "  # trailing space: next token is the answer digit itself
@@ -132,6 +139,7 @@ def main():
             except ValueError:
                 continue
             pos = idxs[-1]
+            n_proc += 1
             Lc, hidden, _ = logits_last(model, tok, device, prompt, want_hidden=True, layer=args.layer)
             clean_correct += int(argmax_answer(Lc) == (a + b))
             h_orig = hidden[pos]                              # [d_model]
@@ -154,10 +162,10 @@ def main():
                 per_mode[mode]["flip"].append(flip)
                 per_mode[mode]["n"] += 1
 
-        n = max(len(cases), 1)
+        n = max(n_proc, 1)
         results[form] = {
             "axis": D.FORMS[form].axis,
-            "n_cases": len(cases),
+            "n_cases": n_proc,
             "clean_acc": clean_correct / n,
             "modes": {m: {"mean_shift": float(np.mean(per_mode[m]["shift"])) if per_mode[m]["shift"] else float("nan"),
                           "pos_shift_rate": float(np.mean([s > 0 for s in per_mode[m]["shift"]])) if per_mode[m]["shift"] else float("nan"),

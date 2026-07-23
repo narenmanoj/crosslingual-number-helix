@@ -84,15 +84,20 @@ def orthogonal_procrustes_cv(X: np.ndarray, Y: np.ndarray, k: int = 12,
 
     X = np.asarray(X, float); Y = np.asarray(Y, float)
     kk = min(k, X.shape[0] - 1, X.shape[1], Y.shape[1])
-    Xr = PCA(n_components=kk).fit_transform(X)
-    Yr = PCA(n_components=kk).fit_transform(Y)  # each form in its OWN principal axes
-    Xc = Xr - Xr.mean(0); Yc = Yr - Yr.mean(0)
 
-    n = Xc.shape[0]
+    n = X.shape[0]
     rng = np.random.default_rng(seed)
     idx = rng.permutation(n)
     ntr = int(train_frac * n)
     tr, te = idx[:ntr], idx[ntr:]
+
+    # NO LEAKAGE: fit each form's PCA and centering on the TRAIN numbers only, then transform test
+    # with the same fit. (Previously PCA.fit_transform saw all rows before the split.)
+    px = PCA(n_components=kk, svd_solver="full").fit(X[tr])
+    py = PCA(n_components=kk, svd_solver="full").fit(Y[tr])
+    Xr, Yr = px.transform(X), py.transform(Y)
+    xm, ym = Xr[tr].mean(0), Yr[tr].mean(0)         # center by TRAIN means
+    Xc, Yc = Xr - xm, Yr - ym
 
     # orthogonal Procrustes: argmin_R ||Xc[tr] R - Yc[tr]||,  R = U V^T
     U, _, Vt = np.linalg.svd(Xc[tr].T @ Yc[tr], full_matrices=False)
