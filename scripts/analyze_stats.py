@@ -238,11 +238,12 @@ def main():
         for yi, r in zip(y, cr):
             col = AXIS_COLORS.get(r["axis"], "#333")
             ax.plot([r["lo"], r["hi"]], [yi, yi], color=col, lw=1.5, alpha=1 if r["sig_ci"] else 0.4)
-            # filled circle = FDR-significant; open = CI-only; x = n.s.
-            ax.scatter([r["effect"]], [yi], s=30, zorder=3, color=col,
-                       marker="o" if r["sig_ci"] else "x",
-                       facecolors=col if r.get("sig_fdr") else "none",
-                       edgecolors=col)
+            # filled circle = FDR-significant; open circle = CI-only; x = n.s.
+            if r["sig_ci"]:
+                ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="o",
+                           facecolors=col if r.get("sig_fdr") else "none", edgecolors=col)
+            else:
+                ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="x", color=col)
         ax.axvline(0, color="#999", lw=1, ls="--")
         ax.set_yticks(y); ax.set_yticklabels([f"{r['model']}:{r['form']}" for r in cr], fontsize=6)
         ax.set_xlabel(xlabel); ax.set_title(claim)

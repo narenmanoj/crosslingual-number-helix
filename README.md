@@ -147,11 +147,18 @@ neighborhood is well-populated (all citations below verified 2026-07-18):
   [2604.20817](https://arxiv.org/abs/2604.20817)) — orthogonal to our **cross-form, within-model** question.
 
 **Our defensible contribution** — the intersection none of the above occupies:
-> Do the *specific Fourier-helix number coordinates* **literally overlap** (principal-angle subspace
-> measurement) across **numeral scripts** (Devanagari / Arabic-Indic / fullwidth), **notation**
-> (digit↔word), and **language** (EN/ES/FR/DE number-words) *within a single model*; do those
-> coordinates support **causal cross-form arithmetic transport** (natural-activation interchange); are
-> they **naturally necessary** (matched-null ablation); and how does this vary **by architecture**?
+> Do the *Fourier-helix number directions* **share a subspace** across **numeral scripts** (Devanagari
+> / Arabic-Indic / fullwidth), **notation** (digit↔word), and **language** (EN/ES/FR/DE number-words)
+> *within a single model*; do those directions support **causal cross-form arithmetic transport**
+> (natural-activation interchange + matched-arithmetic delta transport); are they **naturally
+> necessary** (matched-null ablation); and how does this vary **by architecture**?
+
+> **Span vs coordinates (precision, per code audit #1).** Principal-angle `subspace_cos` measures a
+> shared *span* — two forms could share the 8-dim helix subspace while a rotation relabels which
+> direction is period-2 vs the linear term. We therefore also report **coordinate-level identity**
+> (`canonical_map_cosines`: per-feature signed cosine between the two forms' feature→model maps) and
+> a **pipeline-matched permutation null** (`permutation_alignment_null`), and we say "shared subspace"
+> for the span result and "shared coordinates" only where the canonical cosines are high.
 
 Three load-bearing elements — drop any one and a prior paper covers us: **helix-coordinate /
 principal-angle** (else → FARS), **numeral-script** (else → Semantic Hub / script-invariance SAEs),
@@ -525,8 +532,9 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
   (language = en_word↔foreign words), and the full pairwise matrix + word-to-word cells are reported
   (`run_structure.py`). The ordering survives; the language gap shrinks.
 - ✅ **Final-token-only interventions — FIXED.** `--intervention-pos {last,span,after}`; whole-span
-  ablation is required for multi-token forms and *changed the finding* (language necessity is real).
-  Token counts are recorded.
+  ablation is required for multi-token forms (last-token under-ablates). Token counts are recorded.
+  *(At 9-model scale the earlier "language necessity is real" read did not hold — necessity is
+  script-biased and often undefined for foreign words at floor clean-acc; see H3 necessity.)*
 - ✅ **Matched controls — ADDED.** Ablation is tested against covariance-matched and shuffled-Fourier
   nulls (not just Haar-random), with removed-energy reported; interchange uses a norm-matched random
   control; per-seed curves are kept (no rounding) with mean±std.
@@ -541,9 +549,36 @@ External-review weaknesses and their status. ✅ = addressed; ◐ = partly; ☐ 
   the ablation sweep). `scripts/analyze_stats.py` reads those and reports **bootstrap 95% CIs +
   paired significance** per (model, form): sufficiency (subspace−random shift), necessity
   (structured-null−helix accuracy drop, vs shuffled-Fourier by default), and matched-source
-  interchange (subspace−norm-matched-random). A finding is called significant only when its 95% CI
-  **excludes 0** (stricter than the one-sided *p* also reported). ☐ *Open:* raise cases/form (defaults
-  bumped — transport 80, overnight 120; necessity 8 seeds) and regenerate final figures with CIs.
+  interchange (subspace−norm-matched-random). A finding is significant only when its 95% CI
+  **excludes 0**. `analyze_stats.py` now also reports a **sign-flip permutation test** (a proper
+  null-centered p, not just the bootstrap), a **Benjamini-Hochberg FDR** correction across cells per
+  claim, and a **per-model aggregation** (so "45 individually significant cells" is not the unit of
+  analysis) — addressing audit #11. ☐ *Open:* raise cases/form and cluster-bootstrap by source value
+  (needs per-case key logging) for fully independence-aware CIs.
+
+### Code audit (2026-07) — status
+A external code+measurement audit (`experiments/crosslingual_number_helix_code_audit.md`) is largely
+addressed. **Numerical/reproducibility (require regenerating magnitudes):**
+- ✅ **Fourier basis centering (#3).** The fit regressed centered PCA scores on an *uncentered* basis
+  with no intercept, corrupting R² and every reconstructed vector (R² on a clean linear code 0.66→**1.0**).
+  Now centered; `B_mean` stored and reused in reconstruction. **⚠ invalidates prior reconstruction-based
+  transport magnitudes and R² — rerun before quoting numbers.**
+- ✅ **Deterministic PCA (#8)** (`svd_solver="full"`) in fit, cov-matched control, Procrustes; ✅ **Procrustes
+  leakage** — PCA/centering now fit on the train split only.
+- ✅ **Hook-equivalence test (#4).** `verify_hook_layer` asserts `hidden_states[L]==block L-1 output` per
+  architecture (prints rel-error at startup; 0.0 on Qwen) — the assumption behind the cross-architecture claim.
+- ✅ **Whole-span energy (#5/6)** (was last-token, first-seed only); ✅ **shared case set + honest denominator (#10)**.
+
+**Measurement scope (new instruments):**
+- ✅ **Coordinate-level identity (#1).** `canonical_map_cosines` reports per-feature signed cosine (not just
+  span overlap); README wording split into "shared subspace" vs "shared coordinates".
+- ✅ **Matched-arithmetic delta transport (#2)** — `run_transport.py --delta` transports only
+  `QQᵀ(h_en(a′,b)−h_en(a,b))` (holds addend/syntax/format/offset fixed); a `delta_transport` claim in `analyze_stats`.
+- ✅ **Held-out helix R² + pipeline-matched permutation null (#7)**; ✅ **context-matched ablation baseline (#12)**
+  (`--ablation-baseline form_arith`, now default); ✅ **answer-token validation (#9)** (`validate_single_token_answers`).
+- ✅ **Test suite** (`tests/test_core.py`, 13 tests) locking in the above.
+- ☐ **Open (need new data / decisions):** carrier-language factorial (attribute the language gap to lexicalization
+  vs carrier sentence); preregistered causal-layer selection; full continuation-likelihood / word-form output readouts.
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
