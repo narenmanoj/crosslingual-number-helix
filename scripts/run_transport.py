@@ -39,7 +39,7 @@ from src.helix import fit_helix
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis, top_pca_span_basis,
     shuffled_fourier_basis, make_patched_vector, patch_residual, assert_hook_equivalence,
-    subspace_delta, norm_match,
+    subspace_delta, norm_match, norm_match_diag, energy_matched_bank, ALPHA_LO, ALPHA_HI,
 )
 from src.provenance import stamp, VALIDATED, LEGACY, E_DELTA, E_ABSOLUTE
 
@@ -69,13 +69,22 @@ def parse_args():
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9, help="keep answers single-token")
     p.add_argument("--pairs-per-form", type=int, default=80, help="raise for tighter CIs (cap ~all valid triples)")
-    p.add_argument("--fit-max", type=int, default=99, help="fit the en_digit helix on 0..fit_max")
+    # DISJOINT value sets (audit r5 blocker #2): Q is fitted on fit_min..fit_max (default 10..99) while
+    # the causal test uses 0..max_sum (default 0..9) -- so the intervention subspace never saw the exact
+    # values it is tested on. Pass --fit-min 0 to reproduce the older overlapping-fit behaviour.
+    p.add_argument("--fit-min", type=int, default=10, help="low end of the helix fit range (10 => disjoint from 0..9)")
+    p.add_argument("--fit-max", type=int, default=99, help="fit the en_digit helix on fit_min..fit_max")
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--delta", dest="delta", action="store_true", default=True,
                    help="matched-arithmetic DELTA transport -- the DEFAULT/primary estimand")
     p.add_argument("--no-delta", dest="delta", action="store_false")
     p.add_argument("--delta-ctrl-seeds", type=int, default=5,
                    help="seeds PER control family (haar/pca_span/shuf_fourier), all norm-matched + retained")
+    p.add_argument("--energy-matched-controls", dest="energy_matched_controls", action="store_true",
+                   default=True, help="select control subspaces with helix-like natural projected "
+                                      "energy so norm-matching stays admissible (audit r5 #6)")
+    p.add_argument("--no-energy-matched-controls", dest="energy_matched_controls", action="store_false")
+    p.add_argument("--ctrl-candidates", type=int, default=60, help="candidate bank size per family")
     p.add_argument("--include-legacy-absolute-patching", dest="legacy_absolute", action="store_true",
                    default=False, help="ALSO run the legacy absolute-target modes (full/subspace/random) "
                                        "as a labelled legacy_diagnostic -- off by default (audit r4 #2)")
@@ -115,7 +124,11 @@ def main():
     print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}\n")
 
     # --- fit the en_digit helix at the target layer (pooling='last' -> a single patchable position) ---
-    fit_numbers = list(range(0, args.fit_max + 1))
+    fit_numbers = list(range(args.fit_min, args.fit_max + 1))
+    causal_values = list(range(0, args.max_sum + 1))
+    disjoint = set(fit_numbers).isdisjoint(causal_values)
+    print(f"fit values: {fit_numbers[0]}..{fit_numbers[-1]} | causal values: 0..{args.max_sum} | "
+          f"disjoint: {disjoint}{'' if disjoint else '  <-- Q saw the causal test values'}")
     acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers),
                                     pooling="last")
     fit = fit_helix(acts[args.layer], fit_numbers, k_pca=args.k_pca)
@@ -126,13 +139,32 @@ def main():
     r = Q.shape[1]
     Q_rand = random_subspace_basis(r, d_model, seed=args.seed)
     ctrl_seeds = list(range(args.delta_ctrl_seeds))
-    # three control FAMILIES for the delta estimand, every seed retained (audit r4 #4/#5)
-    ctrl_banks = {
-        "haar": [random_subspace_basis(r, d_model, seed=args.seed + 1 + i) for i in ctrl_seeds],
-        "pca_span": [top_pca_span_basis(HL, r, seed=args.seed + 1 + i) for i in ctrl_seeds],
-        "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + 1 + i)
-                         for i in ctrl_seeds],
-    }
+    # three control FAMILIES for the delta estimand, every seed retained (audit r4 #4/#5).
+    # Candidates are ENERGY-MATCHED (audit r5 #6): a Haar subspace in d~1500 captures almost none of an
+    # 8-d displacement, so naive draws need alpha~8 and are inadmissible by the predefined band. We
+    # draw a larger bank and keep the subspaces whose natural projected energy resembles the helix's,
+    # then still norm-match exactly. The selection procedure is recorded in the output.
+    sample_vecs = HL[: min(32, len(HL))] - fit["mean"]           # representative displacements
+    bank_reports = {}
+    if args.energy_matched_controls:
+        builders = {"haar": lambda sd: random_subspace_basis(r, d_model, seed=sd),
+                    "pca_span": lambda sd: top_pca_span_basis(HL, r, seed=sd),
+                    "shuf_fourier": lambda sd: shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=sd)}
+        ctrl_banks = {}
+        for fam, build in builders.items():
+            ctrl_banks[fam], bank_reports[fam] = energy_matched_bank(
+                sample_vecs, Q, r, d_model, n_keep=args.delta_ctrl_seeds,
+                n_candidates=args.ctrl_candidates, seed=args.seed + 1, builder=build)
+    else:
+        ctrl_banks = {
+            "haar": [random_subspace_basis(r, d_model, seed=args.seed + 1 + i) for i in ctrl_seeds],
+            "pca_span": [top_pca_span_basis(HL, r, seed=args.seed + 1 + i) for i in ctrl_seeds],
+            "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + 1 + i)
+                             for i in ctrl_seeds],
+        }
+    for fam, rep in bank_reports.items():
+        print(f"  control bank [{fam}]: kept {rep['n_kept']}/{rep['n_candidates']} candidates, "
+              f"implied alpha {np.round(rep['implied_alpha'], 2).tolist()}")
     recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a' (legacy modes)
     ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
 
@@ -174,7 +206,10 @@ def main():
     for form in args.forms:
         per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in all_modes}
         ctrl_by_seed = {f: [] for f in DELTA_FAMILIES}   # per-case list of per-seed shifts (audit r4 #4)
-        alphas = {f: [] for f in DELTA_FAMILIES}         # norm-match scale factors (audit r4 #7)
+        alphas = {f: [] for f in DELTA_FAMILIES}         # flat alphas for the summary
+        # FULL case x seed diagnostics -- retained, not summarized away (audit r5 #6)
+        diag = {f: {k: [] for k in ("alpha", "raw_norm", "matched_norm", "admissible")}
+                for f in DELTA_FAMILIES}
         case_keys, delta_keys = [], []     # audit #12: (a, a', b) per case, aligned to the per-case arrays
         clean_correct = 0
         n_proc = 0  # cases that survived token-span identification (the honest denominator)
@@ -232,18 +267,24 @@ def main():
                 sh, fl = shift_of(h_orig + dvec_h)
                 per_mode["delta"]["shift"].append(sh); per_mode["delta"]["flip"].append(fl); per_mode["delta"]["n"] += 1
                 for fam in DELTA_FAMILIES:
-                    seed_sh, seed_fl = [], []
+                    seed_sh, seed_fl, seed_alpha, seed_raw, seed_matched, seed_adm = [], [], [], [], [], []
                     for Qc in ctrl_banks[fam]:
-                        raw = subspace_delta(diff, Qc)
-                        nraw = float(np.linalg.norm(raw))
-                        alphas[fam].append(nh / nraw if nraw > 1e-8 else float("nan"))
-                        s, f = shift_of(h_orig + norm_match(raw, nh))   # NORM-MATCH to the helix delta
+                        # NORM-MATCH to the helix delta, keeping the FULL per-(case,seed) diagnostics
+                        dc, dg = norm_match_diag(subspace_delta(diff, Qc), nh)
+                        s, f = shift_of(h_orig + dc)
                         seed_sh.append(s); seed_fl.append(f)
+                        seed_alpha.append(dg["alpha"]); seed_raw.append(dg["raw_norm"])
+                        seed_matched.append(dg["matched_norm"]); seed_adm.append(dg["admissible"])
                     m = FAM2MODE[fam]
                     per_mode[m]["shift"].append(float(np.mean(seed_sh)))
                     per_mode[m]["flip"].append(float(np.mean(seed_fl)))   # MEASURED, not hard-coded (audit r4 #6)
                     per_mode[m]["n"] += 1
                     ctrl_by_seed[fam].append([float(s) for s in seed_sh])
+                    diag[fam]["alpha"].append([float(x) for x in seed_alpha])
+                    diag[fam]["raw_norm"].append([float(x) for x in seed_raw])
+                    diag[fam]["matched_norm"].append([float(x) for x in seed_matched])
+                    diag[fam]["admissible"].append([bool(x) for x in seed_adm])
+                    alphas[fam].extend(seed_alpha)
                 delta_keys.append((a, ap, b))
 
         n = max(n_proc, 1)
@@ -263,10 +304,12 @@ def main():
             # full case x seed control matrices -- never only the mean (audit r4 #4)
             "delta_control_by_seed": ctrl_by_seed,
             "control_seeds": ctrl_seeds,
-            # norm-match scale diagnostics: a huge alpha means the control captured almost none of the
-            # displacement, so the "matched" intervention is an extrapolation off-manifold (audit r4 #7)
+            # FULL per-(case, seed) norm-match diagnostics + the predefined admissibility flag, so the
+            # analysis can run primary-on-admissible / sensitivity-on-all (audit r5 #6)
+            "control_diagnostics": diag,
+            "alpha_range": [ALPHA_LO, ALPHA_HI],
             "delta_alpha": {f: {"median": float(np.nanmedian(alphas[f])) if alphas[f] else float("nan"),
-                                "frac_out_of_range": float(np.mean([(x < 0.25) or (x > 4.0)
+                                "frac_out_of_range": float(np.mean([not (ALPHA_LO <= x <= ALPHA_HI)
                                                                     for x in alphas[f] if np.isfinite(x)]))
                                 if alphas[f] else float("nan")}
                              for f in DELTA_FAMILIES},
@@ -307,10 +350,14 @@ def main():
            "legacy_absolute_estimand": E_ABSOLUTE if args.legacy_absolute else None,
            "intervention_position": "source_last_token",
            "delta_control_families": DELTA_FAMILIES,
+           "control_bank_selection": bank_reports,
+           "energy_matched_controls": args.energy_matched_controls,
            "model_revision": model_revision(model, args.model),
            "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
-           "delta_ctrl_seeds": args.delta_ctrl_seeds, "results": results}
+           "delta_ctrl_seeds": args.delta_ctrl_seeds,
+           "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
+           "value_sets_disjoint": disjoint, "results": results}
     tag = args.model.split("/")[-1]
     path = os.path.join(args.out_dir, f"transport_{tag}_L{args.layer}.json")
     with open(path, "w") as fh:

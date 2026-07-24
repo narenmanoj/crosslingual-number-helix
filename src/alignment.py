@@ -51,15 +51,20 @@ def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
 
 
 def random_subspace_floor(dirs_ref: np.ndarray, d_model: int, n_trials: int = 20, seed: int = 0) -> float:
-    """Mean principal-angle cosine between the reference subspace and random subspaces of
-    the same dimension. This is the 'no real alignment' baseline."""
-    rng = np.random.default_rng(seed)
-    r = dirs_ref.shape[0]
+    """Mean principal-angle cosine between the reference subspace and random subspaces of the same
+    dimension -- the 'no real alignment' baseline.
+
+    Uses the OBSERVED rank of the fitted subspace, not the nominal Fourier-feature count (audit r5
+    #11): rank-revealing orthonormalization can drop degenerate directions, and a floor built at the
+    wrong dimension is not comparable to the measured overlap (floor grows with r)."""
     Qref = orthonormal_basis(dirs_ref)
+    r = Qref.shape[1]                       # observed rank, NOT dirs_ref.shape[0]
+    if r == 0:
+        return float("nan")
+    rng = np.random.default_rng(seed)
     vals = []
     for _ in range(n_trials):
-        R = rng.standard_normal((r, d_model))
-        Qr = orthonormal_basis(R)
+        Qr = orthonormal_basis(rng.standard_normal((r, d_model)))
         vals.append(float(np.cos(subspace_angles(Qref, Qr)).mean()))
     return float(np.mean(vals))
 

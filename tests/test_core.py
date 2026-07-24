@@ -22,7 +22,7 @@ from src.extract import validate_single_token_answers, continuation_answer_ids
 from src.provenance import (require_schema, admits, stamp, git_metadata,
                             VALIDATED, LEGACY, EXPLORATORY, E_DELTA, E_ABSOLUTE)
 from analyze_stats import (bh_fdr, paired, paired_by_key, cluster_boot, cluster_sign_p,
-                           hier_boot, seed_stats)
+                           crossed_boot, seed_stats, build_cell)
 
 RNG = np.random.default_rng(0)
 NUMS = list(range(100))
@@ -319,18 +319,130 @@ def test_paired_by_key_strict():
             pass
 
 
-def test_seed_stats_and_hier_boot():
+def test_seed_stats_and_crossed_boot():
     # signal beats every control seed -> P(beat)=1 and even the worst-control margin is positive
     M = np.full((20, 5), 0.8) + RNG.standard_normal((20, 5)) * 0.01
     s = seed_stats(M)
     assert s["p_beats_random_control"] == 1.0
     assert s["vs_worst_control"] > 0 and s["vs_strong_control_q90"] > 0
-    lo, hi = hier_boot(M, None, B=1000)
-    assert lo > 0, "hierarchical CI should exclude 0 when signal dominates every seed"
+    lo, hi = crossed_boot(M, None, B=1000)
+    assert lo > 0, "crossed CI should exclude 0 when signal dominates every seed"
     # a signal that only beats the control MEAN has P(beat) well below 1
     M2 = np.tile(np.array([2.0, -1.0, 0.5, -0.5, 0.2]), (20, 1))
     assert seed_stats(M2)["p_beats_random_control"] < 0.8
     assert seed_stats(M2)["vs_worst_control"] < 0
+
+
+# ---- audit round 5: rerun-readiness blockers ----
+def test_layer_selection_prefers_heldout_not_insample():
+    """Blocker #1: a layer that overfits (high in-sample, poor held-out) must NOT be selected."""
+    from src.helix import select_layer_independent, fit_helix
+    nums = list(range(60))
+    # layer 1: genuine helix structure (generalizes). layer 2: pure noise (fits in-sample, not held-out)
+    real, _ = _helix_code(noise=0.05, seed=7)
+    acts = {1: real[:60], 2: RNG.standard_normal((60, 64)) * 3.0}
+    ins = {L: fit_helix(acts[L], nums, k_pca=20)["r2"] for L in acts}
+    sel = select_layer_independent(acts, nums, k_pca=20)
+    assert sel["selected_layer"] == 1, f"must pick the generalizing layer, got {sel}"
+    assert sel["metric"] == "heldout_r2" and sel["form_used"] == "en_digit"
+    assert sel["selection_frozen_before_crossform_eval"] is True
+    # the bias this fixes: the noise layer's IN-SAMPLE R^2 far exceeds what it generalizes to
+    ho = {d["layer"]: d["heldout_r2"] for d in sel["per_layer"]}
+    assert ins[2] - ho[2] > 0.2, f"noise layer should overfit (in-sample {ins[2]:.2f} vs held-out {ho[2]:.2f})"
+    assert ho[1] > ho[2], "the generalizing layer must win on held-out R^2"
+
+
+def test_crossed_bootstrap_preserves_seed_variance():
+    """Blocker #3: with large BETWEEN-seed variance, the crossed CI must be wider than a
+    row-wise-seed-resampling CI, which averages that variance away."""
+    from analyze_stats import crossed_boot
+    rng = np.random.default_rng(3)
+    n, k = 40, 6
+    seed_offsets = rng.standard_normal(k) * 1.0        # large between-seed spread
+    M = seed_offsets[None, :] + rng.standard_normal((n, k)) * 0.02   # tiny within-seed noise
+    groups = np.arange(n)
+    clo, chi = crossed_boot(M, groups, B=1500, seed=0)
+    # emulate the OLD nested sampler: independent seed per row
+    rg = np.random.default_rng(0)
+    means = [M[rg.integers(0, n, n), rg.integers(0, k, n)].mean() for _ in range(1500)]
+    nlo, nhi = np.percentile(means, [2.5, 97.5])
+    assert (chi - clo) > (nhi - nlo) * 1.5, \
+        f"crossed CI {chi-clo:.3f} must be materially wider than nested {nhi-nlo:.3f}"
+
+
+def test_build_cell_aligns_groups_seeds_and_nans():
+    """Blocker #4: reordering, and NaN filtering, must keep diff/groups/seed-matrix/keys aligned."""
+    from analyze_stats import build_cell
+    keys = [(1, 5, 1), (2, 6, 1), (3, 7, 1)]
+    a, b = [10.0, 20.0, 30.0], [1.0, 2.0, 3.0]
+    sm = np.array([[0.0, 0.1], [1.0, 1.1], [2.0, 2.1]])
+    diff, groups, sm2, order = build_cell(a, b, keys, seed_matrix=sm, cluster_by=0)
+    assert list(order) == sorted(keys) and list(groups) == [1, 2, 3]
+    assert np.allclose(diff, [9.0, 18.0, 27.0]) and np.allclose(sm2[:, 0], [0.0, 1.0, 2.0])
+    # a NaN in one case must drop that case from EVERY aligned object
+    a_nan = [10.0, float("nan"), 30.0]
+    diff2, groups2, sm3, order2 = build_cell(a_nan, b, keys, seed_matrix=sm, cluster_by=0)
+    assert len(diff2) == 2 and list(groups2) == [1, 3] and len(order2) == 2
+    assert np.allclose(sm3[:, 0], [0.0, 2.0]), "seed matrix rows must follow the same mask"
+    # cluster_by=1 clusters on the TARGET value instead
+    _, g_t, _, _ = build_cell(a, b, keys, cluster_by=1)
+    assert list(g_t) == [5, 6, 7]
+    # mismatched seed-matrix row count is an error, not a silent truncation
+    try:
+        build_cell(a, b, keys, seed_matrix=sm[:2])
+        assert False, "must reject a seed matrix with the wrong number of rows"
+    except ValueError:
+        pass
+
+
+def test_run_dir_validation_rejects_bad_runs(tmpdir=None):
+    """Blocker #5: mixed commits, dirty results, duplicate cells and missing models must all fail."""
+    import json
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.2", expected_models=["M1", "M2"],
+                             expected_experiments=["transport"], expected_forms=["en_digit"], allow_dirty=True)
+        cm = man["code_commit"]      # results must share the manifest's commit
+        ok = [("t_M1.json", {"experiment_type": "transport", "model": "M1", "code_commit": cm, "dirty_worktree": False}),
+              ("t_M2.json", {"experiment_type": "transport", "model": "M2", "code_commit": cm, "dirty_worktree": False})]
+        validate_run_dir(d, ok)                                        # clean run passes
+        mixed = ok + [("t_M3.json", {"experiment_type": "transport", "model": "M2", "code_commit": "XYZ", "dirty_worktree": False})]
+        dirty = ok + [("t_M4.json", {"experiment_type": "transport", "model": "M2", "code_commit": cm, "dirty_worktree": True})]
+        for bad, why in ((mixed, "mixed commits"),
+                         (ok[:1], "missing expected model"),
+                         (ok + [("dup.json", {"experiment_type": "transport", "model": "M1",
+                                              "code_commit": cm, "dirty_worktree": False})], "duplicate cell")):
+            try:
+                validate_run_dir(d, bad)
+                assert False, f"must reject: {why}"
+            except ValueError:
+                pass
+        # no manifest at all -> refuse a production analysis
+        d2 = tempfile.mkdtemp()
+        try:
+            validate_run_dir(d2, ok, require_manifest=True)
+            assert False, "must refuse a directory with no manifest"
+        except ValueError:
+            pass
+        finally:
+            shutil.rmtree(d2, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_norm_match_diag_flags_off_manifold_control():
+    """Blocker #6: a control with a near-zero raw projection must be RETAINED and flagged, not hidden."""
+    from src.patching import norm_match_diag, ALPHA_LO, ALPHA_HI
+    good, dg = norm_match_diag(np.array([1.0, 0.0, 0.0]), 1.0)
+    assert dg["admissible"] and np.isclose(dg["alpha"], 1.0) and np.isclose(np.linalg.norm(good), 1.0)
+    _, bad = norm_match_diag(np.array([1e-6, 0.0, 0.0]), 1.0)       # tiny raw projection
+    assert bad["alpha"] > ALPHA_HI and not bad["admissible"], "huge alpha must be flagged inadmissible"
+    assert np.isfinite(bad["raw_norm"]) and bad["raw_norm"] > 0, "raw norm must be retained"
+    _, zero = norm_match_diag(np.zeros(3), 1.0)
+    assert not zero["admissible"] and np.isinf(zero["alpha"])
 
 
 def test_aggregate_uses_clean_contrasts():

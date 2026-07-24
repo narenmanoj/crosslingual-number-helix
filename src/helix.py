@@ -89,6 +89,36 @@ def shuffled_control_r2(H, numbers, seed=0, **kw) -> float:
     return fit_helix(H, shuffled, **kw)["r2"]
 
 
+def select_layer_independent(acts_by_layer, discovery_values, periods=DEFAULT_PERIODS,
+                             k_pca: int = 20, candidate_layers=None, seed: int = 0) -> dict:
+    """Unbiased layer selection (audit r5 blocker #1).
+
+    The old `--layer scan` maximized IN-SAMPLE R^2 averaged over ALL forms, then evaluated cross-form
+    geometry at that layer -- the target forms and the evaluation values both influenced the choice,
+    so the reported alignment was optimistically biased.
+
+    This selects using ONE form's activations (pass en_digit) on DISCOVERY values only, scoring
+    HELD-OUT R^2, and returns the frozen choice plus the metadata needed to audit it. Call this before
+    looking at any other form.
+
+    acts_by_layer: {layer -> [n_discovery, d_model]} for the discovery form/values.
+    Returns {"selected_layer", "metric", "form_used", "discovery_values", "per_layer", "tie_break"}.
+    """
+    layers = sorted(acts_by_layer) if candidate_layers is None else list(candidate_layers)
+    scored = []
+    for L in layers:
+        m, s = heldout_r2(acts_by_layer[L], discovery_values, periods=periods, k_pca=k_pca, seed=seed)
+        scored.append({"layer": int(L), "heldout_r2": float(m), "heldout_r2_std": float(s)})
+    best = max(scored, key=lambda d: (d["heldout_r2"], -d["layer"]))  # ties -> shallower layer
+    return {"selected_layer": int(best["layer"]),
+            "metric": "heldout_r2",
+            "form_used": "en_digit",
+            "discovery_values": [int(v) for v in discovery_values],
+            "tie_break": "lowest_layer",
+            "selection_frozen_before_crossform_eval": True,
+            "per_layer": scored}
+
+
 def heldout_r2(H, numbers, periods=DEFAULT_PERIODS, k_pca: int = 20,
                train_frac: float = 0.7, n_splits: int = 5, seed: int = 0):
     """Honest generalization R^2 (audit #7): fit PCA + the centered Fourier map on a TRAIN subset of

@@ -44,6 +44,7 @@ from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
     make_patched_vector, norm_matched_ablation, subspace_delta, norm_match, subspace_energy,
     patch_residual, patch_residual_multi, assert_hook_equivalence, _proj,
+    norm_match_diag, ALPHA_LO, ALPHA_HI,
 )
 from src.provenance import stamp, VALIDATED, E_ABLATION
 
@@ -67,7 +68,12 @@ def parse_args():
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9)
     p.add_argument("--pairs-per-form", type=int, default=40)
+    # DISJOINT value sets (audit r5 #2): Q fitted on 10..99, causal test on 0..max_sum.
+    p.add_argument("--fit-min", type=int, default=10, help="10 => helix fit disjoint from the 0..9 causal values")
     p.add_argument("--fit-max", type=int, default=99)
+    p.add_argument("--on-baseline-fallback", default="skip", choices=["skip", "error", "label"],
+                   help="what to do when a cross-fit baseline bucket has no out-of-source examples "
+                        "(audit r5 #7): skip the case (default), fail, or use it with an explicit label")
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--n-seeds", type=int, default=8, help="control-null seeds; more = tighter null bands")
     p.add_argument("--device", default=C.DEVICE)
@@ -117,7 +123,7 @@ def main():
     hook_err = assert_hook_equivalence(model, tok, device, hook_layer)  # audit #4: fail-fast, saved to JSON
     print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}")
 
-    fit_numbers = list(range(0, args.fit_max + 1))
+    fit_numbers = list(range(args.fit_min, args.fit_max + 1))
     acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers), pooling="last")
     HL = acts[args.layer]
     fit = fit_helix(HL, fit_numbers, k_pca=args.k_pca)
@@ -185,17 +191,30 @@ def main():
                     buckets.setdefault((len(idxs), p - idxs[0]), []).append((a, hid[p]))
 
         def baseline_at(idxs, p, src):
-            """Per-(token-count, relative-position) mean, EXCLUDING cases whose source value == src."""
+            """Per-(token-count, relative-position) mean, EXCLUDING cases whose source value == src.
+
+            Returns (vector, meta). NEVER silently relaxes the rule (audit r5 #7): if the cross-fit
+            bucket has no out-of-source examples the caller decides (skip / error / explicitly label),
+            and every patched position records which baseline estimand it actually used."""
             if args.ablation_baseline != "form_arith":
-                return mean_vec
-            entries = buckets.get((len(idxs), p - idxs[0]))
-            if not entries:
-                return mean_vec
+                return mean_vec, {"baseline_source": "carrier_fit_mean", "n_calibration_examples": 0,
+                                  "fallback_used": False, "excluded_source_value": None}
+            entries = buckets.get((len(idxs), p - idxs[0]), [])
             if args.baseline_crossfit == "source_value":
                 held = [v for (s, v) in entries if s != src]
                 if held:
-                    return np.mean(held, axis=0)
-            return np.mean([v for (_, v) in entries], axis=0)
+                    return np.mean(held, axis=0), {"baseline_source": "crossfit_form_arith",
+                                                   "n_calibration_examples": len(held),
+                                                   "fallback_used": False, "excluded_source_value": src}
+                # no admissible cross-fit calibration for this (token-count, position, source)
+                return None, {"baseline_source": "unavailable", "n_calibration_examples": 0,
+                              "fallback_used": True, "excluded_source_value": src}
+            if entries:
+                return np.mean([v for (_, v) in entries], axis=0), {
+                    "baseline_source": "form_arith_insample", "n_calibration_examples": len(entries),
+                    "fallback_used": False, "excluded_source_value": None}
+            return None, {"baseline_source": "unavailable", "n_calibration_examples": 0,
+                          "fallback_used": True, "excluded_source_value": src}
 
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
@@ -203,7 +222,12 @@ def main():
         clean_case, helix_case, ab_keys = [], [], []
         ctrl_case = {c: [] for c in CONTROLS}                              # per-case MEAN over seeds
         ctrl_case_by_seed = {c: [] for c in CONTROLS}                     # per-case list of per-seed 0/1 (audit r3 #3)
-        ctrl_alpha = {c: [] for c in CONTROLS}                            # norm-match scale factors (audit r4 #7)
+        ctrl_alpha = {c: [] for c in CONTROLS}                            # flat alphas for the summary
+        # FULL per-(case, seed) norm-match diagnostics + admissibility (audit r5 #6)
+        ctrl_diag = {c: {k: [] for k in ("alpha", "raw_norm", "matched_norm", "admissible")}
+                     for c in CONTROLS}
+        baseline_meta = []          # per-case, per-position baseline provenance (audit r5 #7)
+        n_skipped_baseline = 0
         tok_counts, n = [], 0
         for (a, b) in ab_cases:
             a_str = D.FORMS[form].render(a)
@@ -214,7 +238,24 @@ def main():
                 continue
             Lc, hidden, seq_len = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
             positions = intervention_positions(idxs, args.intervention_pos, seq_len)
-            base = {p: baseline_at(idxs, p, a) for p in positions}        # cross-fit per-position baseline
+            # cross-fit per-position baseline; a missing calibration bucket is NEVER silently relaxed
+            bres = {p: baseline_at(idxs, p, a) for p in positions}
+            if any(v is None for v, _ in bres.values()):
+                if args.on_baseline_fallback == "error":
+                    raise SystemExit(f"no cross-fit baseline for {form} (a={a}, b={b}); "
+                                     "use --on-baseline-fallback skip|label or add calibration data")
+                if args.on_baseline_fallback == "skip":
+                    n_skipped_baseline += 1
+                    continue
+                # 'label': fall back to the pooled bucket mean but RECORD it as a different estimand
+                for p, (v, meta) in list(bres.items()):
+                    if v is None:
+                        ent = buckets.get((len(idxs), p - idxs[0]), [])
+                        pooled = np.mean([x for (_, x) in ent], axis=0) if ent else mean_vec
+                        meta.update(baseline_source="labeled_fallback_pooled" if ent else "labeled_fallback_carrier")
+                        bres[p] = (pooled, meta)
+            base = {p: v for p, (v, _) in bres.items()}
+            baseline_meta.append({str(p): m for p, (_, m) in bres.items()})
             n += 1
             tok_counts.append(len(idxs)); ab_keys.append((a, b))
             cc = int(argmax_ans(Lc) == a + b); clean_ok += cc; clean_case.append(cc)
@@ -225,20 +266,26 @@ def main():
             # WHOLE-SPAN helix removed energy: sqrt(sum_p ||QQ^T(h_p - base_p)||^2)
             energy["helix"].append(float(np.sqrt(sum(subspace_energy(Q, hidden[p], base[p]) ** 2 for p in positions))))
             for c in CONTROLS:
-                seed_correct = []
+                seed_correct, s_alpha, s_raw, s_matched, s_adm = [], [], [], [], []
                 for si, Qc in enumerate(ctrl_bases[c]):
                     # NORM-MATCHED ablation: remove the SAME energy as the helix at each position (audit r3 #3)
                     p2v = {p: norm_matched_ablation(hidden[p], base[p], Q_signal=Q, Q_control=Qc) for p in positions}
                     sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
                     ctrl_ok[c][si] += sc; seed_correct.append(sc)
-                    # scale factor alpha: a very large alpha means the control barely overlaps (h-mu),
-                    # so the "matched" ablation is an extrapolation off-manifold (audit r4 #7)
+                    # per-(case, seed) norm-match diagnostics, aggregated over the patched span
+                    a_list, r_list, m_list = [], [], []
                     for p in positions:
-                        nrc = float(np.linalg.norm(_proj(Qc, hidden[p] - base[p])))
                         nrs = float(np.linalg.norm(_proj(Q, hidden[p] - base[p])))
-                        ctrl_alpha[c].append(nrs / nrc if nrc > 1e-8 else float("nan"))
+                        _, dg = norm_match_diag(_proj(Qc, hidden[p] - base[p]), nrs)
+                        a_list.append(dg["alpha"]); r_list.append(dg["raw_norm"]); m_list.append(dg["matched_norm"])
+                    s_alpha.append(float(np.mean(a_list))); s_raw.append(float(np.mean(r_list)))
+                    s_matched.append(float(np.mean(m_list)))
+                    s_adm.append(bool(ALPHA_LO <= np.mean(a_list) <= ALPHA_HI))
+                    ctrl_alpha[c].extend(a_list)
                 ctrl_case[c].append(float(np.mean(seed_correct)))
                 ctrl_case_by_seed[c].append([int(s) for s in seed_correct])
+                ctrl_diag[c]["alpha"].append(s_alpha); ctrl_diag[c]["raw_norm"].append(s_raw)
+                ctrl_diag[c]["matched_norm"].append(s_matched); ctrl_diag[c]["admissible"].append(s_adm)
                 # after norm-matching, per-seed removed energy ~ helix energy by construction (report helix's)
                 energy[c].append(energy["helix"][-1])
         n = max(n, 1)
@@ -253,8 +300,12 @@ def main():
                          for c in CONTROLS},
             "removed_energy": {k: float(np.mean(v)) for k, v in energy.items()},
             "controls_norm_matched": True,
+            "control_diagnostics": ctrl_diag,
+            "alpha_range": [ALPHA_LO, ALPHA_HI],
+            "baseline_meta": baseline_meta,
+            "n_skipped_no_baseline": n_skipped_baseline,
             "control_alpha": {c: {"median": float(np.nanmedian(ctrl_alpha[c])) if ctrl_alpha[c] else float("nan"),
-                                  "frac_out_of_range": float(np.mean([(x < 0.25) or (x > 4.0)
+                                  "frac_out_of_range": float(np.mean([not (ALPHA_LO <= x <= ALPHA_HI)
                                                                       for x in ctrl_alpha[c] if np.isfinite(x)]))
                                   if ctrl_alpha[c] else float("nan")}
                               for c in CONTROLS},
@@ -338,6 +389,9 @@ def main():
            "interchange_estimand": "matched_arithmetic_delta",
            "r": r, "n_seeds": args.n_seeds, "ablation_baseline": args.ablation_baseline,
            "baseline_fit_split": "in_run", "baseline_crossfit_group": args.baseline_crossfit,
+           "on_baseline_fallback": args.on_baseline_fallback,
+           "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
+           "value_sets_disjoint": set(range(args.fit_min, args.fit_max + 1)).isdisjoint(range(0, args.max_sum + 1)),
            "controls_norm_matched": True, "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}

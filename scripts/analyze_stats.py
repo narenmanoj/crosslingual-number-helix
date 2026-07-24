@@ -6,9 +6,11 @@ This script now REFUSES files that do not declare the expected schema / experime
 analysis_status (audit r4 #1), and only admits legacy or exploratory estimands behind explicit flags.
 
 Default claim family (all `analysis_status: validated`):
-  - delta_transport        : matched-arithmetic delta  −  norm-matched Haar control   [PRIMARY sufficiency]
-  - delta_vs_pca_span      : same signal vs a top-PCA-span control
-  - delta_vs_shuf_fourier  : same signal vs a shuffled-pipeline control
+  - delta_vs_shuf_fourier  : delta vs a shuffled-pipeline control   [PRIMARY -- admissible, alpha~1]
+  - delta_vs_pca_span      : delta vs a top-PCA-span control        [admissible, alpha~2]
+  - delta_transport        : delta vs a norm-matched Haar control   [usually DROPPED: a random 8-d
+    subspace in ~1500-d needs alpha~8-10 to norm-match, so it is an extrapolation, not a control.
+    --admissible-only (default) removes it; --all-controls restores it as a sensitivity view.]
   - interchange            : delta interchange  −  norm-matched control
   - necessity              : structured-null acc  −  helix-ablate acc (norm-matched, @ ablation layer)
 
@@ -39,7 +41,7 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
-from src.provenance import (require_schema, VALIDATED, LEGACY, EXPLORATORY,
+from src.provenance import (require_schema, validate_run_dir, VALIDATED, LEGACY, EXPLORATORY,
                             E_DELTA, E_ABSOLUTE, E_ABLATION, E_LAYER_VULN)
 
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
@@ -107,9 +109,14 @@ def bh_fdr(pvals, alpha=0.05):
     return reject, q
 
 
-def hier_boot(seed_diff, groups, B, seed=0, alpha=0.05):
-    """Hierarchical bootstrap (audit r4 #4): resample CASES (clustered by group), then sample ONE
-    control seed within each case, so control-direction uncertainty propagates into the interval."""
+def crossed_boot(seed_diff, groups, B, seed=0, alpha=0.05):
+    """CROSSED bootstrap over case clusters x GLOBAL control seeds (audit r5 blocker #3).
+
+    A control seed is one global subspace reused across every case, so the dependence is *crossed*,
+    not nested. Sampling an independent seed per row (the old hierarchical version) invents an
+    experiment where each case had its own control basis, which averages seed variance away and makes
+    the CI too narrow. Here we resample case clusters AND resample the seed set, applying the sampled
+    seeds to all sampled rows -- so between-seed variance survives."""
     M = np.asarray(seed_diff, float)                     # [n_cases, n_seeds]
     n, k = M.shape
     rng = np.random.default_rng(seed)
@@ -118,8 +125,9 @@ def hier_boot(seed_diff, groups, B, seed=0, alpha=0.05):
     by_g = {g: np.where(groups == g)[0] for g in uniq}
     means = np.empty(B)
     for j in range(B):
-        rows = np.concatenate([by_g[g] for g in uniq[rng.integers(0, len(uniq), size=len(uniq))]])
-        means[j] = M[rows, rng.integers(0, k, size=len(rows))].mean()
+        rows = np.concatenate([by_g[g] for g in rng.choice(uniq, size=len(uniq), replace=True)])
+        seeds = rng.choice(k, size=k, replace=True)      # ONE seed set applied to ALL sampled rows
+        means[j] = M[np.ix_(rows, seeds)].mean()
     lo, hi = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(lo), float(hi)
 
@@ -160,24 +168,53 @@ def paired(a, b):
 
 # ----------------------------- row construction -----------------------------
 
-def add_row(rows, claim, tag, form, axis, diff, B, groups=None, seed_diff=None, status=VALIDATED):
-    diff = np.asarray(diff, float)
-    diff = diff[~np.isnan(diff)]
-    n = len(diff)
-    if n < 2:
-        return
-    est = float(diff.mean())
+def build_cell(values_a, values_b, keys, seed_matrix=None, cluster_by=0):
+    """Assemble one analysis cell with EVERYTHING aligned by case key (audit r5 blocker #4).
+
+    Pairs strictly by key (rejecting reordering / duplicates / differing case sets), then derives the
+    cluster labels and the control seed-matrix rows FROM THE SAME sorted key order, and finally
+    applies ONE validity mask to diff + groups + seed_matrix + keys together -- so NaN filtering can
+    never silently misalign the pieces.
+
+    cluster_by indexes the case key: 0=source value, 1=target value, 2=addend.
+    Returns (diff, groups, seed_matrix, keys) or None if too few usable cases."""
+    keys = [tuple(k) for k in keys]
+    diff, order = paired_by_key(values_a, keys, values_b, keys)
+    pos = {k: i for i, k in enumerate(keys)}
+    groups = np.array([k[cluster_by] if len(k) > cluster_by else 0 for k in order])
+    sm = None
+    if seed_matrix is not None:
+        sm_full = np.asarray(seed_matrix, float)
+        if len(sm_full) != len(keys):
+            raise ValueError(f"seed matrix has {len(sm_full)} rows but there are {len(keys)} cases")
+        sm = sm_full[[pos[k] for k in order]]           # reorder rows to the paired key order
+    valid = np.isfinite(diff)
+    if sm is not None:
+        valid &= np.isfinite(sm).all(axis=1)
+    diff, groups = diff[valid], groups[valid]
+    order = [k for k, keep in zip(order, valid) if keep]
+    if sm is not None:
+        sm = sm[valid]
+    return (diff, groups, sm, order) if len(diff) >= 2 else None
+
+
+def add_row(rows, claim, tag, form, axis, cell, B, status=VALIDATED, extra=None):
+    """cell = (diff, groups, seed_matrix|None, keys) from build_cell()."""
+    diff, groups, seed_diff, keys = cell
     lo, hi = cluster_boot(diff, groups, B)
     row = {"claim": claim, "model": tag, "form": form, "axis": axis, "status": status,
-           "effect": est, "lo": lo, "hi": hi, "n": n,
+           "effect": float(diff.mean()), "lo": lo, "hi": hi, "n": int(len(diff)),
+           "n_clusters": int(len(np.unique(groups))),
            "perm_p": cluster_sign_p(diff, groups, B),
-           "clustered": groups is not None,
+           "clustered": True,
            "sig_ci": bool(lo > 0 or hi < 0)}
-    if seed_diff is not None and len(seed_diff) == n:
+    if seed_diff is not None:
         row.update(seed_stats(seed_diff))
-        hlo, hhi = hier_boot(seed_diff, groups, B)
-        row["hier_lo"], row["hier_hi"] = hlo, hhi
-        row["sig_hier"] = bool(hlo > 0 or hhi < 0)      # the most conservative interval
+        clo, chi = crossed_boot(seed_diff, groups, B)   # crossed case x seed CI (blocker #3)
+        row["crossed_lo"], row["crossed_hi"] = clo, chi
+        row["sig_crossed"] = bool(clo > 0 or chi < 0)   # the most conservative interval
+    if extra:
+        row.update(extra)
     rows.append(row)
 
 
@@ -204,6 +241,20 @@ def parse_args():
     p.add_argument("--strict", dest="strict", action="store_true", default=True,
                    help="raise on an inadmissible file (default); --no-strict skips it with a warning")
     p.add_argument("--no-strict", dest="strict", action="store_false")
+    p.add_argument("--production", action="store_true", default=False,
+                   help="validate the whole run directory against its manifest: one commit, no dirty "
+                        "results, no duplicate cells, no missing expected models (audit r5 #5)")
+    p.add_argument("--admissible-only", dest="admissible_only", action="store_true", default=True,
+                   help="PRIMARY: keep only control seeds inside the predefined alpha band (audit r5 #6)")
+    p.add_argument("--all-controls", dest="admissible_only", action="store_false",
+                   help="sensitivity analysis: include controls that needed extreme norm matching")
+    p.add_argument("--cluster-by", type=int, default=0, choices=[0, 1, 2],
+                   help="case-key index to cluster on: 0=source value (default), 1=target, 2=addend "
+                        "-- rerun with each for the dependence sensitivity analysis (audit r5 #8)")
+    p.add_argument("--positions", nargs="*", default=["span", "last", "after"],
+                   help="necessity ablation positions to include, read from JSON metadata (audit r5 #10)")
+    p.add_argument("--global-fdr", action="store_true", default=False,
+                   help="also report a single BH correction across ALL primary cells (audit r5 #9)")
     return p.parse_args()
 
 
@@ -225,7 +276,7 @@ def load_admissible(path, args, *, experiment, estimands, statuses):
 
 def main():
     args = parse_args()
-    rows, skipped = [], []
+    rows, skipped, loaded = [], [], []
 
     # ---------------- transport: delta (primary) + optional legacy absolute ----------------
     for f in sorted(glob.glob(os.path.join(args.out_dir, "transport_*_L*.json"))):
@@ -237,65 +288,85 @@ def main():
                             statuses={VALIDATED} | ({LEGACY} if args.legacy else set()))
         if d is None:
             skipped.append(f); continue
+        loaded.append((os.path.basename(f), d))
         for form, R in d.get("results", {}).items():
             pc, ax = R.get("per_case_shift", {}), R.get("axis", axis_of(form))
             keys = R.get("per_case_keys", {})
-            dk = [tuple(k) for k in keys.get("delta", [])]
-            g_delta = [k[0] for k in dk] if dk else None
+            dk = keys.get("delta", [])
             by_seed = R.get("delta_control_by_seed", {})
+            adm_all = R.get("control_diagnostics", {})
             # PRIMARY: delta vs each norm-matched control family
             for fam, mode, claim in (("haar", "delta_rand", "delta_transport"),
                                      ("pca_span", "delta_pca_span", "delta_vs_pca_span"),
                                      ("shuf_fourier", "delta_shuf_fourier", "delta_vs_shuf_fourier")):
-                if "delta" in pc and mode in pc and len(pc["delta"]):
-                    sd = None
-                    if by_seed.get(fam):
-                        sig = np.asarray(pc["delta"], float)[:, None]
-                        sd = sig - np.asarray(by_seed[fam], float)      # [cases, seeds], + supports claim
-                    add_row(rows, claim, tag, form, ax, paired(pc["delta"], pc[mode]), args.b,
-                            groups=g_delta, seed_diff=sd)
+                if not ("delta" in pc and mode in pc and len(pc["delta"]) and dk):
+                    continue
+                sm = by_seed.get(fam)
+                if sm and args.admissible_only and adm_all.get(fam, {}).get("admissible"):
+                    # PRIMARY analysis keeps only controls inside the predefined alpha band (r5 #6);
+                    # an all-inadmissible case yields NaN and is dropped by the aligned validity mask.
+                    admit = np.asarray(adm_all[fam]["admissible"], bool)
+                    sm = np.where(admit, np.asarray(sm, float), np.nan)
+                    sm = [row if np.isfinite(row).any() else [np.nan] * len(row) for row in sm]
+                    sm = [np.where(np.isfinite(r), r, np.nanmean(r)) if np.isfinite(r).any() else r
+                          for r in sm]
+                sig = np.asarray(pc["delta"], float)
+                sd = (sig[:, None] - np.asarray(sm, float)) if sm is not None else None
+                cell = build_cell(pc["delta"], pc[mode], dk, seed_matrix=sd, cluster_by=args.cluster_by)
+                if cell:
+                    add_row(rows, claim, tag, form, ax, cell, args.b,
+                            extra={"alpha_frac_out": R.get("delta_alpha", {}).get(fam, {}).get("frac_out_of_range")})
             # LEGACY (opt-in only): absolute subspace vs absolute random
-            if args.legacy and "subspace" in pc and "random" in pc:
-                mk = [tuple(k) for k in keys.get("modes", [])]
-                gm = [k[0] for k in mk] if mk else None
-                add_row(rows, "sufficiency", tag, form, ax, paired(pc["subspace"], pc["random"]),
-                        args.b, groups=gm, status=LEGACY)
+            if args.legacy and "subspace" in pc and "random" in pc and keys.get("modes"):
+                cell = build_cell(pc["subspace"], pc["random"], keys["modes"], cluster_by=args.cluster_by)
+                if cell:
+                    add_row(rows, "sufficiency", tag, form, ax, cell, args.b, status=LEGACY)
 
     # ---------------- necessity: ablation + delta interchange ----------------
-    for f in sorted(glob.glob(os.path.join(args.out_dir, "necessity_*_span.json"))
-                    + glob.glob(os.path.join(args.out_dir, "necessity_*_last.json"))):
+    # Loaded by METADATA, not filename (audit r5 #10): every necessity file is considered and its
+    # ablation_position is read from the JSON, so `after`-position runs are no longer invisible.
+    for f in sorted(glob.glob(os.path.join(args.out_dir, "necessity_*.json"))):
         tag = os.path.basename(f)[len("necessity_"):].rsplit("_L", 1)[0]
         if not want(tag, args.models):
             continue
         d = load_admissible(f, args, experiment="necessity", estimands={E_ABLATION}, statuses={VALIDATED})
         if d is None:
             skipped.append(f); continue
+        pos = d.get("ablation_position", "?")
+        if args.positions and pos not in args.positions:
+            continue
+        loaded.append((os.path.basename(f), d))
+        suffix = "" if pos == args.positions[0] else f"@{pos}"     # keep positions as distinct cells
         for form, A in d.get("ablation", {}).items():
             pc = A.get("per_case", {})
-            if args.null not in pc.get("controls", {}):
+            if args.null not in pc.get("controls", {}) or not pc.get("keys"):
                 continue
-            keys = [tuple(k) for k in pc.get("keys", [])]
-            g = [k[0] for k in keys] if keys else None
+            sm = pc.get("controls_by_seed", {}).get(args.null)
+            adm = A.get("control_diagnostics", {}).get(args.null, {}).get("admissible")
+            if sm and args.admissible_only and adm:
+                sm = np.where(np.asarray(adm, bool), np.asarray(sm, float), np.nan)
+                sm = [np.where(np.isfinite(r), r, np.nanmean(r)) if np.isfinite(r).any() else r for r in sm]
+            helix = np.asarray(pc["helix"], float)
+            sd = (np.asarray(sm, float) - helix[:, None]) if sm is not None else None
             # effect = null_acc - helix_acc  (positive => ablating the helix hurts MORE)
-            diff = paired(pc["controls"][args.null], pc["helix"])
-            sd = None
-            if pc.get("controls_by_seed", {}).get(args.null):
-                helix = np.asarray(pc["helix"], float)[:, None]
-                sd = np.asarray(pc["controls_by_seed"][args.null], float) - helix
-            add_row(rows, "necessity", tag, form, A.get("axis", axis_of(form)), diff, args.b,
-                    groups=g, seed_diff=sd)
+            cell = build_cell(pc["controls"][args.null], pc["helix"], pc["keys"],
+                              seed_matrix=sd, cluster_by=args.cluster_by)
+            if cell:
+                add_row(rows, "necessity" + suffix, tag, form, A.get("axis", axis_of(form)), cell, args.b,
+                        extra={"ablation_position": pos,
+                               "n_skipped_no_baseline": A.get("n_skipped_no_baseline")})
         for form, I in d.get("interchange", {}).items():
             pc = I.get("per_case", {})
-            if not pc:
+            if not pc.get("keys"):
                 continue
-            keys = [tuple(k) for k in pc.get("keys", [])]
-            g = [k[0] for k in keys] if keys else None
-            sd = None
-            if I.get("control_by_seed"):
-                sig = np.asarray(pc["subspace"], float)[:, None]
-                sd = sig - np.asarray(I["control_by_seed"], float)
-            add_row(rows, "interchange", tag, form, I.get("axis", axis_of(form)),
-                    paired(pc["subspace"], pc["matched_random"]), args.b, groups=g, seed_diff=sd)
+            sm = I.get("control_by_seed")
+            sig = np.asarray(pc["subspace"], float)
+            sd = (sig[:, None] - np.asarray(sm, float)) if sm else None
+            cell = build_cell(pc["subspace"], pc["matched_random"], pc["keys"],
+                              seed_matrix=sd, cluster_by=args.cluster_by)
+            if cell:
+                add_row(rows, "interchange" + suffix, tag, form, I.get("axis", axis_of(form)), cell, args.b,
+                        extra={"interchange_position": I.get("intervention_position")})
 
     # ---------------- exploratory sweeps (opt-in only) ----------------
     if args.exploratory:
@@ -307,12 +378,24 @@ def main():
                                 statuses={EXPLORATORY})
             if d is None:
                 skipped.append(f); continue
+            loaded.append((os.path.basename(f), d))
             for form, Cv in d.get("curves", {}).items():
                 ps = Cv.get("heldout_peak_structured", {}).get(args.null)
-                if ps and "per_case" in ps:
-                    g = [k[0] for k in ps["keys"]] if ps.get("keys") else None
-                    add_row(rows, "necessity_peak", tag, form, axis_of(form),
-                            np.array(ps["per_case"], float), args.b, groups=g, status=EXPLORATORY)
+                if ps and "per_case" in ps and ps.get("keys"):
+                    pcv = np.asarray(ps["per_case"], float)
+                    cell = build_cell(pcv, np.zeros_like(pcv), ps["keys"], cluster_by=args.cluster_by)
+                    if cell:
+                        add_row(rows, "necessity_peak", tag, form, axis_of(form), cell, args.b,
+                                status=EXPLORATORY)
+
+    # ---------------- whole-run-directory validation for production reports (audit r5 #5) ----------
+    if args.production:
+        try:
+            man = validate_run_dir(args.out_dir, loaded, require_manifest=True)
+            print(f"\nRUN VALIDATED: {man.get('run_id')} @ {str(man.get('code_commit'))[:7]} "
+                  f"({len(loaded)} result files, one commit, no duplicates, no missing models)")
+        except ValueError as e:
+            raise SystemExit(f"\nPRODUCTION RUN REJECTED: {e}\n")
 
     if not rows:
         print("No admissible per-case data found. Re-run the experiments (schema "
@@ -320,12 +403,19 @@ def main():
         return
 
     # ---------------- FDR over the DEFAULT family only (opt-in claims excluded) ----------------
-    default_rows = [r for r in rows if r["claim"] in DEFAULT_CLAIMS]
+    # PREREGISTERED FAMILIES: each claim is its own BH family (they test different control families /
+    # different interventions). --global-fdr additionally reports one correction across all primary
+    # cells as a sensitivity analysis, since per-family correction is the more permissive choice (r5 #9).
+    default_rows = [r for r in rows if r["claim"].split("@")[0] in DEFAULT_CLAIMS]
     for claim in {r["claim"] for r in default_rows}:
         cr = [r for r in default_rows if r["claim"] == claim]
         reject, q = bh_fdr([r["perm_p"] for r in cr], alpha=args.alpha)
         for r, rj, qq in zip(cr, reject, q):
             r["q"], r["sig_fdr"] = float(qq), bool(rj)
+    if args.global_fdr and default_rows:
+        rej_g, q_g = bh_fdr([r["perm_p"] for r in default_rows], alpha=args.alpha)
+        for r, rj, qq in zip(default_rows, rej_g, q_g):
+            r["q_global"], r["sig_fdr_global"] = float(qq), bool(rj)
     for r in rows:                       # opt-in claims are reported but never FDR-corrected here
         r.setdefault("q", float("nan"))
         r.setdefault("sig_fdr", False)
@@ -338,14 +428,14 @@ def main():
     print("\n" + "=" * 134)
     print(f"PAIRED TESTS  (schema {args.schema}; B={args.b}; necessity null={args.null}; FDR alpha={args.alpha})")
     print("  CI = cluster bootstrap by source value | perm p = CLUSTER-level sign flip | q = BH-FDR (default family only)")
-    print("  P(beat ctrl) = fraction of (case, control-seed) draws the signal beats | hier = hierarchical CI over cases x seeds")
+    print("  P(beat ctrl) = fraction of (case, control-seed) draws the signal beats | xCI = CROSSED CI over case clusters x global control seeds")
     print("-" * 134)
     print(f"  {'claim':<21}{'model':<21}{'form':<18}{'axis':<9}{'effect':>8}{'95% CI':>17}"
-          f"{'perm_p':>8}{'q':>7}{'P(beat)':>9}{'CI':>4}{'FDR':>5}{'hier':>6}{'n':>5}")
+          f"{'perm_p':>8}{'q':>7}{'P(beat)':>9}{'CI':>4}{'FDR':>5}{'xCI':>6}{'n':>5}")
     for r in rows:
         ci = f"[{r['lo']:.2f}, {r['hi']:.2f}]"
         pb = f"{r['p_beats_random_control']:.2f}" if "p_beats_random_control" in r else "  -"
-        hh = flag(r["sig_hier"]) if "sig_hier" in r else "-"
+        hh = flag(r["sig_crossed"]) if "sig_crossed" in r else "-"
         print(f"  {r['claim']:<21}{r['model'][:20]:<21}{r['form']:<18}{r['axis']:<9}{r['effect']:>8.3f}{ci:>17}"
               f"{r['perm_p']:>8.3f}{r['q']:>7.3f}{pb:>9}{flag(r['sig_ci']):>4}{flag(r['sig_fdr']):>5}{hh:>6}{r['n']:>5}")
     print("=" * 134)
@@ -357,20 +447,20 @@ def main():
     # ---------------- summaries ----------------
     print("\nSIGNIFICANCE SUMMARY (default validated family only; CI = clustered, FDR on cluster perm p):")
     for claim in DEFAULT_CLAIMS:
-        cr = [r for r in default_rows if r["claim"] == claim]
+        cr = [r for r in default_rows if r["claim"].split("@")[0] == claim]
         if cr:
             print(f"  {claim:<22} CI {sum(r['sig_ci'] for r in cr):>2}/{len(cr):<2}   "
                   f"FDR {sum(r['sig_fdr'] for r in cr):>2}/{len(cr):<2}")
 
     models = sorted({r["model"] for r in default_rows})
-    present = [c for c in DEFAULT_CLAIMS if any(r["claim"] == c for r in default_rows)]
+    present = [c for c in DEFAULT_CLAIMS if any(r["claim"].split("@")[0] == c for r in default_rows)]
     if models and present:
         print("\nPER-MODEL fraction of forms significant (FDR):")
         print(f"  {'model':<24}" + "".join(f"{c[:14]:>16}" for c in present))
         for mdl in models:
             cells = "".join(
                 (lambda cr: f"{(sum(r['sig_fdr'] for r in cr) / len(cr)):>16.2f}" if cr else f"{'-':>16}")(
-                    [r for r in default_rows if r["model"] == mdl and r["claim"] == c])
+                    [r for r in default_rows if r["model"] == mdl and r["claim"].split("@")[0] == c])
                 for c in present)
             print(f"  {mdl[:23]:<24}{cells}")
 
@@ -378,16 +468,18 @@ def main():
     out = {"schema_version": args.schema, "bootstrap_B": args.b, "necessity_null": args.null,
            "alpha": args.alpha, "default_claims": DEFAULT_CLAIMS,
            "included_legacy": args.legacy, "included_exploratory": args.exploratory,
+           "admissible_only": args.admissible_only, "cluster_by": args.cluster_by,
+           "positions": args.positions, "production_validated": args.production,
            "skipped_files": [os.path.basename(s) for s in skipped], "rows": rows}
     with open(os.path.join(args.out_dir, "stats_summary.json"), "w") as fh:
         json.dump(out, fh, indent=2)
 
-    panels = [(c, c) for c in DEFAULT_CLAIMS if any(r["claim"] == c for r in default_rows)]
+    panels = [(c, c) for c in DEFAULT_CLAIMS if any(r["claim"].split("@")[0] == c for r in default_rows)]
     if panels:
         fig, axes = plt.subplots(1, len(panels), figsize=(5.2 * len(panels), 8))
         axes = np.atleast_1d(axes)
         for ax, (claim, xlabel) in zip(axes, panels):
-            cr = sorted([r for r in default_rows if r["claim"] == claim],
+            cr = sorted([r for r in default_rows if r["claim"].split("@")[0] == claim],
                         key=lambda r: (r["model"], r["form"]))
             y = np.arange(len(cr))[::-1]
             for yi, r in zip(y, cr):

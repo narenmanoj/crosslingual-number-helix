@@ -36,7 +36,7 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
                          continuation_answer_ids)
 from src.helix import fit_helix
 from src.alignment import subspace_alignment, random_subspace_floor, subspace_overlap
-from src.provenance import stamp, VALIDATED, E_GEOMETRY
+from src.provenance import stamp, admits, git_metadata, VALIDATED, EXPLORATORY, E_GEOMETRY, E_ABLATION
 
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
 
@@ -55,6 +55,8 @@ def parse_args():
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
+    p.add_argument("--necessity-corr", action="store_true", default=False,
+                   help="attach the EXPLORATORY geometry<->necessity correlation (audit r5 #13)")
     return p.parse_args()
 
 
@@ -133,17 +135,37 @@ def main():
     spear = spearmanr(xs, ys)
 
     # optional necessity-Delta correlation (necessity_{tag}_L{layer}_{pos}.json; take newest match)
+    # Geometry<->necessity correlation (audit r5 #13). This is EXPLORATORY and must not contaminate an
+    # otherwise-validated geometry output: it has few, non-independent form points, and it reads a
+    # separate result file. So we (a) validate that file's schema/estimand/status/commit before using
+    # it, (b) require the commit to match this run, and (c) label the block exploratory.
     tag = args.model.split("/")[-1]
     import glob
-    nec_files = sorted(glob.glob(os.path.join(args.out_dir, f"necessity_{tag}_L{layer}*.json")))
     nec_corr = None
-    if nec_files:
-        nec = json.load(open(nec_files[-1]))["ablation"]
-        common = [f for f in corr_forms if f in nec and "controls" in nec[f]]
-        if len(common) >= 3:
-            nx = np.array([share[f] for f in common])
-            nd = np.array([nec[f]["controls"]["random"]["acc_mean"] - nec[f]["acc_helix_ablate"] for f in common])
-            nec_corr = {"forms": common, "pearson_r": float(pearsonr(nx, nd)[0])}
+    if args.necessity_corr:
+        this_commit = git_metadata()["code_commit"]
+        for nf in reversed(sorted(glob.glob(os.path.join(args.out_dir, f"necessity_{tag}_L{layer}*.json")))):
+            nd_all = json.load(open(nf))
+            if not admits(nd_all, expected_schema=C.SCHEMA_VERSION, expected_experiment="necessity",
+                          allowed_estimands={E_ABLATION}, allowed_statuses={VALIDATED}):
+                print(f"  necessity-corr: skipping inadmissible {os.path.basename(nf)}")
+                continue
+            if this_commit and nd_all.get("code_commit") != this_commit:
+                print(f"  necessity-corr: skipping {os.path.basename(nf)} (different code commit)")
+                continue
+            nec = nd_all["ablation"]
+            common = [f for f in corr_forms if f in nec and "controls" in nec[f]]
+            if len(common) >= 3:
+                nx = np.array([share[f] for f in common])
+                ndv = np.array([nec[f]["controls"]["random"]["acc_mean"] - nec[f]["acc_helix_ablate"]
+                                for f in common])
+                nec_corr = {"analysis_status": EXPLORATORY, "source_file": os.path.basename(nf),
+                            "source_commit": nd_all.get("code_commit"),
+                            "ablation_position": nd_all.get("ablation_position"),
+                            "null_family": "random", "n_form_points": len(common),
+                            "forms": common, "pearson_r": float(pearsonr(nx, ndv)[0]),
+                            "caveat": "few non-independent form points; not a validated claim"}
+            break
 
     # ---------- CLEAN CONTRASTS (fix the reference-form confound) ----------
     # "language" must compare number-WORDS to number-WORDS (en_word <-> foreign), not en_digit <-> words.

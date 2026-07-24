@@ -61,10 +61,15 @@ Scoped to what the current code actually establishes:
   structured directions. Necessity for foreign number-*words* is largely undefined (base models are
   near floor on that task).
 
-**An early lesson from the hardened controls:** against a naive Haar control the delta effect looks
-enormous, but Haar subspaces capture little of the displacement (norm-match scale α ≈ 8, far outside
-the admissible range) — so that comparison is an extrapolation. Against a *plausible*
-shuffled-pipeline control (α ≈ 1) the margin roughly halves. Both are now reported.
+**A lesson from the hardened controls — the Haar control is not usable here.** Against a naive
+Haar subspace the delta effect looks enormous, but a random 8-d subspace in ~1500-d captures only
+≈√(8/1536) ≈ 7% of any vector, so norm-matching it needs α ≈ 8–10: the "matched" control is an
+extrapolation, not a plausible intervention. This is structural, not bad luck — selecting the best 2
+of 40 candidates still leaves α ≈ 10. The predefined admissibility band (0.25 ≤ α ≤ 4) therefore
+**drops the Haar comparison from the primary analysis automatically**, and the defensible primary
+controls are the structured ones, which *are* admissible: top-PCA-span (α ≈ 2) and shuffled-Fourier
+(α ≈ 1.06). Against those the margin is smaller but honest. Haar remains available as a sensitivity
+view via `--all-controls`.
 
 ## Reproducing
 
@@ -101,6 +106,24 @@ python scripts/run_necessity.py --model $M --layer $L --intervention-pos span \
 # 5. statistics over everything above (no model load, seconds)
 python scripts/analyze_stats.py --out-dir experiments --b 20000
 ```
+
+### Production runs are isolated
+
+A shared output directory lets a stale-but-compatible file from an earlier job slip into a report, or
+a partially-failed run be analyzed as if complete. Production runs therefore get their own directory
+and a manifest declaring what they must produce:
+
+```bash
+python scripts/new_run.py --run-id pilot01 \
+    --models Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407
+# -> experiments/2026-07-23_<commit>_pilot01/   (refuses to open on a dirty worktree)
+
+OUT_DIR=experiments/2026-07-23_<commit>_pilot01 bash scripts/run_overnight.sh
+python scripts/analyze_stats.py --out-dir <that dir> --production
+```
+
+`--production` validates the directory as a whole: one code commit, no dirty-worktree results, no
+duplicate (experiment, model) cells, no manifest-expected model missing.
 
 ### All models, unattended
 
@@ -139,7 +162,18 @@ The design decisions that make the causal result defensible, all enforced in cod
 - **Controls that are actually matched.** Every control subspace is norm-matched per case, drawn from
   three families (Haar, top-PCA-span, shuffled-pipeline), and **every seed is retained** — so we can
   report *P(signal beats a random control draw)* and worst-control margins, not just "beats the mean".
-  The norm-match scale α is recorded and flagged when it implies an off-manifold extrapolation.
+  The norm-match scale α is stored **per (case, seed)** with a predefined admissibility band
+  (0.25 ≤ α ≤ 4); the primary analysis keeps only admissible controls and `--all-controls` gives the
+  sensitivity view. Because a naive Haar subspace in ~1500-d captures almost none of an 8-d
+  displacement (α ≈ 8, inadmissible), control banks are **energy-matched**: we draw a larger candidate
+  pool and keep the subspaces whose *natural* projected energy resembles the helix's. The selection is
+  recorded in the output, not hidden.
+- **The subspace never sees the values it is tested on.** Q is fitted on numbers 10–99 while the
+  causal test uses 0–9, so "the intervention works" cannot be an artifact of fitting the exact test
+  values. `value_sets_disjoint` is stamped in every result.
+- **Layer choice is frozen before looking.** `select_layer_independent` picks the layer from
+  **en_digit only**, on discovery values, scoring **held-out** R² — never from the cross-form
+  comparison it will later support.
 - **Fail-fast provenance.** Every result stamps schema / experiment type / estimand / analysis status
   / git commit / worktree state; every analysis validates them and **refuses** stale or mismatched
   files. Exploratory sweep results are excluded from the default statistics unless explicitly opted in.

@@ -63,6 +63,7 @@ def parse_args():
     p.add_argument("--layer-stride", type=int, default=2, help="1 = every layer (slower)")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9)
+    p.add_argument("--fit-min", type=int, default=10, help="10 => fit disjoint from the 0..9 causal values")
     p.add_argument("--fit-max", type=int, default=99)
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--n-seeds", type=int, default=3, help="Haar-random null seeds (the peak-picking null)")
@@ -124,7 +125,7 @@ def main():
     hook_err = assert_hook_equivalence(model, tok, device, sweep_layers[len(sweep_layers) // 2] - 1)
     print(f"hook-equivalence rel-error (mid layer): {hook_err:.2e}")
 
-    fit_numbers = list(range(0, args.fit_max + 1))
+    fit_numbers = list(range(args.fit_min, args.fit_max + 1))
     acts = extract_form_activations(model, tok, device, D.build_prompts("en_digit", fit_numbers),
                                    pooling="last")
     fitL, Q_L, mean_L = {}, {}, {}
@@ -263,7 +264,9 @@ def main():
            "model_revision": model_revision(model, args.model),
            "layers": sweep_layers, "r": r, "forms": args.forms, "n_seeds": args.n_seeds,
            "null_seeds": args.null_seeds, "structured_nulls": args.structured_nulls,
-           "structured_nulls_norm_matched": True, "intervention_position": "source_last_token",
+           "structured_nulls_norm_matched": True,
+           "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
+           "value_sets_disjoint": set(range(args.fit_min, args.fit_max + 1)).isdisjoint(range(0, args.max_sum + 1)), "intervention_position": "source_last_token",
            "hook_rel_error": hook_err, "ablation_baseline": "carrier_fit_mean",
            "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")

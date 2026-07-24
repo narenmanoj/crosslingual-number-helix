@@ -710,9 +710,42 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
   ✅ **git commit + dirty-worktree saved (#12)** with a production `--no-allow-dirty` gate.
 - ✅ **Tests 25 → 30**, covering schema rejection on each dimension, strict key pairing (including
   reordering), cluster-vs-row permutation conservatism, and seed-level control statistics.
+**Round 5 (rerun-readiness audit) — all 7 production blockers + 6 non-blocking items addressed:**
+- ✅ **B1 Independent layer selection.** `select_layer_independent` picks from **en_digit only**, on
+  discovery values, scoring **held-out** R², frozen before any cross-form evaluation; the selection
+  metadata (metric, discovery values, per-layer scores, tie-break) is saved.
+- ✅ **B2 Disjoint fit/causal values.** `--fit-min` defaults to 10, so Q is fitted on 10–99 while the
+  causal test uses 0–9; `fit_values` / `causal_values` / `value_sets_disjoint` stamped everywhere.
+- ✅ **B3 Crossed bootstrap.** Replaced the nested sampler (which drew an independent seed per row,
+  inventing per-case control bases and shrinking the CI) with `crossed_boot`: resample case clusters
+  **and** the global seed set, applying the sampled seeds to all rows so between-seed variance survives.
+- ✅ **B4 Keyed pairing everywhere + aligned NaN mask.** `build_cell` pairs by case key, derives
+  cluster labels and reorders the seed matrix from the same key order, then applies **one** validity
+  mask to diff / groups / seed-matrix / keys together.
+- ✅ **B5 Isolated production runs.** `scripts/new_run.py` creates `<date>_<commit>_<run-id>/` with a
+  manifest; `analyze_stats --production` rejects mixed commits, dirty results, duplicate cells and
+  manifest-expected models with no results.
+- ✅ **B6 Full norm-match diagnostics + admissibility.** Per-(case, seed) α / raw norm / matched norm /
+  admissible flag retained; predefined band 0.25–4.0; primary analysis is admissible-only,
+  `--all-controls` is the sensitivity view. Added **energy-matched control banks** (larger candidate
+  pool, keep helix-like natural projected energy), with the selection procedure reported.
+- ✅ **B7 No silent baseline fallback.** `baseline_at` returns provenance
+  (`baseline_source`, `n_calibration_examples`, `fallback_used`, `excluded_source_value`);
+  `--on-baseline-fallback skip|error|label` — the default **skips** the case and counts it.
+- ✅ **#8** `--cluster-by {source,target,addend}` for the dependence sensitivity analysis; ✅ **#9**
+  `--global-fdr` sensitivity alongside the per-family correction; ✅ **#10** necessity files are loaded
+  **by metadata** (`ablation_position`), so `after` runs are no longer invisible; ✅ **#11** random
+  floors use the **observed** rank; ✅ **#13** the geometry↔necessity correlation is schema/commit
+  validated, labelled `exploratory`, and opt-in (`--necessity-corr`).
+- **Finding surfaced by B6:** the **Haar norm-matched control is structurally inadmissible** here
+  (α ≈ 8–10 even after selecting 2 of 40 candidates), so the primary sufficiency comparison is now
+  against the *structured* controls (shuffled-Fourier α ≈ 1.06, top-PCA-span α ≈ 2).
+- **Tests 30 → 35**, covering held-out-vs-in-sample layer selection, crossed-vs-nested CI width,
+  build_cell alignment under reordering/NaN, run-directory rejection (mixed commit / duplicate /
+  missing model / no manifest), and off-manifold control flagging.
 - ☐ **Open (need new data / decisions):** carrier-language factorial (#16); post-span & joint-span
-  interventions; preregistered causal-layer selection; continuation-likelihood / word-form readouts;
-  coordinate-level bootstrap CIs + no-rotation cross-prediction; downstream-**sensitivity**-matched
+  necessity comparison (pilot requirement); continuation-likelihood / word-form readouts;
+  coordinate-level bootstrap CIs + no-rotation cross-prediction (#12); downstream-**sensitivity**-matched
   controls (norm matching is not sensitivity matching).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped

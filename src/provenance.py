@@ -86,3 +86,89 @@ def admits(data: dict, *, expected_schema: str, expected_experiment: str,
         return True
     except ValueError:
         return False
+
+
+# --------------------------------------------------------------------------------------
+# Isolated production runs (audit r5 blocker #5). A shared output directory lets a stale but
+# schema-compatible file from an earlier job silently enter a final report. Production runs get
+# their own directory + manifest, and the analyzer validates the directory as a whole.
+# --------------------------------------------------------------------------------------
+ALPHA_RANGE = (0.25, 4.0)   # PREDEFINED norm-match admissibility band (audit r5 #6) -- never tuned post hoc
+
+
+def new_run_dir(root: str, run_id: str) -> str:
+    """experiments/<date>_<commit7>_<run_id>/ -- one directory per production run."""
+    import datetime
+    import os
+    g = git_metadata()
+    commit = (g["code_commit"] or "nocommit")[:7]
+    # date is supplied by the caller's clock; kept in the name purely for human sorting
+    stamp_date = datetime.date.today().isoformat()
+    path = os.path.join(root, f"{stamp_date}_{commit}_{run_id}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_models: list,
+                   expected_experiments: list, expected_forms: list, allow_dirty: bool = False) -> dict:
+    """Declare up-front what this run MUST produce, so a partial run cannot be silently analyzed."""
+    import json
+    import os
+    g = git_metadata()
+    if not allow_dirty and (g["code_commit"] is None or g["dirty_worktree"]):
+        raise RuntimeError(f"production run requires a clean, known worktree (got {g}); "
+                           "commit first or pass allow_dirty=True for a non-production run")
+    man = {"run_id": run_id, "schema_version": schema_version, **g,
+           "expected_models": list(expected_models),
+           "expected_experiments": list(expected_experiments),
+           "expected_forms": list(expected_forms),
+           "allow_dirty": allow_dirty, "completion": {}}
+    with open(os.path.join(run_dir, "manifest.json"), "w") as fh:
+        json.dump(man, fh, indent=2)
+    return man
+
+
+def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = True) -> dict:
+    """Whole-directory admission check for a production analysis.
+
+    `results` is [(basename, parsed_json), ...]. Rejects: mixed code commits, dirty-worktree outputs,
+    duplicate (experiment, model) cells, and models/experiments the manifest expected but that are
+    missing. Returns the manifest (or {} when not required). Raises ValueError on any violation.
+    """
+    import json
+    import os
+    mpath = os.path.join(run_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        if require_manifest:
+            raise ValueError(f"{run_dir}: no manifest.json -- production analyses must run against an "
+                             "isolated run directory created by scripts/new_run.py")
+        return {}
+    man = json.load(open(mpath))
+
+    commits, dirty, cells = set(), [], {}
+    for name, d in results:
+        c = d.get("code_commit")
+        commits.add(c)
+        if d.get("dirty_worktree"):
+            dirty.append(name)
+        key = (d.get("experiment_type"), d.get("model") or d.get("model_revision", {}).get("name"))
+        cells.setdefault(key, []).append(name)
+
+    if len(commits) > 1:
+        raise ValueError(f"{run_dir}: results span MULTIPLE code commits {sorted(map(str, commits))} -- "
+                         "a report must come from one build")
+    if man.get("code_commit") and commits and man["code_commit"] not in commits:
+        raise ValueError(f"{run_dir}: results commit {commits} != manifest commit {man['code_commit']}")
+    if dirty and not man.get("allow_dirty"):
+        raise ValueError(f"{run_dir}: dirty-worktree results present: {sorted(dirty)}")
+    dupes = {k: v for k, v in cells.items() if len(v) > 1}
+    if dupes:
+        raise ValueError(f"{run_dir}: duplicate (experiment, model) cells: {dupes}")
+
+    seen_models = {m for (_, m) in cells if m}
+    missing = [m for m in man.get("expected_models", [])
+               if not any(m.endswith(s) or s.endswith(m) or m == s for s in seen_models)]
+    if missing:
+        raise ValueError(f"{run_dir}: manifest expected models with no results: {missing} "
+                         "(incomplete run -- do not report it)")
+    return man

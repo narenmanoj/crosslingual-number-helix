@@ -243,6 +243,60 @@ def subspace_delta(diff: np.ndarray, Q: np.ndarray) -> np.ndarray:
     return _proj(Q, np.asarray(diff, dtype=float))
 
 
+ALPHA_LO, ALPHA_HI = 0.25, 4.0   # PREDEFINED admissibility band; declared before running (audit r5 #6)
+
+
+def energy_matched_bank(sample_vectors, Q_signal, r: int, d_model: int, n_keep: int = 5,
+                        n_candidates: int = 60, seed: int = 0, builder=None) -> tuple:
+    """Select control subspaces whose NATURAL projected energy already resembles the signal's, so
+    norm-matching is a mild rescale rather than an extrapolation (audit r5 #6, "better control
+    generation").
+
+    A Haar subspace in d~1500 captures almost none of an 8-d structured displacement, so alpha =
+    ||signal proj|| / ||control proj|| is routinely ~8 and every control is inadmissible. Instead we
+    draw `n_candidates` subspaces, score each by its mean projected norm over representative
+    displacement vectors, and keep the `n_keep` closest to the signal's (log-ratio distance, so it is
+    symmetric in over/under-shoot). The selection is reported, not hidden.
+
+    builder(seed) -> [d_model, r] orthonormal basis; defaults to Haar.
+    Returns (bases, report).
+    """
+    S = np.atleast_2d(np.asarray(sample_vectors, dtype=float))
+    build = builder or (lambda sd: random_subspace_basis(r, d_model, seed=sd))
+    target = float(np.mean([np.linalg.norm(_proj(Q_signal, v)) for v in S]))
+    scored = []
+    for i in range(n_candidates):
+        Qc = build(seed + i)
+        e = float(np.mean([np.linalg.norm(_proj(Qc, v)) for v in S]))
+        dist = abs(np.log((e + 1e-12) / (target + 1e-12)))
+        scored.append((dist, i, e, Qc))
+    scored.sort(key=lambda t: t[0])
+    keep = scored[:n_keep]
+    return [t[3] for t in keep], {
+        "selection": "energy_matched_bank",
+        "n_candidates": n_candidates, "n_kept": len(keep),
+        "signal_mean_proj_norm": target,
+        "kept_seeds": [int(t[1]) for t in keep],
+        "kept_mean_proj_norm": [float(t[2]) for t in keep],
+        "implied_alpha": [float(target / t[2]) if t[2] > 1e-12 else float("inf") for t in keep],
+    }
+
+
+def norm_match_diag(raw: np.ndarray, target_norm: float) -> tuple:
+    """Norm-match `raw` to `target_norm` AND return the full diagnostics needed to judge whether the
+    'matched' control is a plausible intervention or an extrapolation (audit r5 #6).
+
+    A control subspace that barely overlaps the displacement has a tiny raw norm, so alpha =
+    target/raw explodes and the rescaled vector is far off-manifold. We keep raw_norm, matched_norm,
+    alpha and an admissibility flag PER (case, seed) -- never just a median."""
+    raw = np.asarray(raw, dtype=float)
+    n_raw = float(np.linalg.norm(raw))
+    alpha = (target_norm / n_raw) if n_raw > 1e-12 else float("inf")
+    matched = norm_match(raw, target_norm)
+    return matched, {"raw_norm": n_raw, "matched_norm": float(np.linalg.norm(matched)),
+                     "alpha": alpha, "admissible": bool(ALPHA_LO <= alpha <= ALPHA_HI)}
+
+
 def norm_matched_ablation(h: np.ndarray, mean: np.ndarray,
                           Q_signal: np.ndarray, Q_control: np.ndarray) -> np.ndarray:
     """Mean-ablate the Q_control subspace, but scaled so the REMOVED energy equals the helix
