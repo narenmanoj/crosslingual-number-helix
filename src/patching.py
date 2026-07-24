@@ -20,6 +20,8 @@ hidden_states indexing: hidden_states[L] (L=0..n_layers) is the residual AFTER d
 """
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import torch
 
@@ -266,19 +268,26 @@ def energy_matched_bank(sample_vectors, Q_signal, r: int, d_model: int, n_keep: 
     target = float(np.mean([np.linalg.norm(_proj(Q_signal, v)) for v in S]))
     scored = []
     for i in range(n_candidates):
-        Qc = build(seed + i)
+        builder_seed = seed + i
+        Qc = build(builder_seed)
         e = float(np.mean([np.linalg.norm(_proj(Qc, v)) for v in S]))
         dist = abs(np.log((e + 1e-12) / (target + 1e-12)))
-        scored.append((dist, i, e, Qc))
+        # hash the actual basis so the exact null bank is reproducible/verifiable (audit r9 #9)
+        bhash = hashlib.sha256(np.ascontiguousarray(Qc).tobytes()).hexdigest()[:16]
+        scored.append((dist, i, builder_seed, e, Qc, bhash))
     scored.sort(key=lambda t: t[0])
     keep = scored[:n_keep]
-    return [t[3] for t in keep], {
+    return [t[4] for t in keep], {
         "selection": "energy_matched_bank",
-        "n_candidates": n_candidates, "n_kept": len(keep),
+        "base_rng_seed": seed, "n_candidates": n_candidates, "n_kept": len(keep),
         "signal_mean_proj_norm": target,
-        "kept_seeds": [int(t[1]) for t in keep],
-        "kept_mean_proj_norm": [float(t[2]) for t in keep],
-        "implied_alpha": [float(target / t[2]) if t[2] > 1e-12 else float("inf") for t in keep],
+        "candidate_indices": [int(t[1]) for t in keep],          # position in the candidate scan
+        "builder_seeds": [int(t[2]) for t in keep],              # the ACTUAL subspace-generation seeds
+        "basis_hashes": [t[5] for t in keep],
+        "kept_mean_proj_norm": [float(t[3]) for t in keep],
+        "selection_scores": [float(t[0]) for t in keep],         # |log(kept_energy / signal_energy)|
+        "selected_order": list(range(len(keep))),                # ascending score => best first
+        "implied_alpha": [float(target / t[3]) if t[3] > 1e-12 else float("inf") for t in keep],
     }
 
 

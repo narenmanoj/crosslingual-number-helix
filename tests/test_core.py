@@ -22,7 +22,7 @@ from src.extract import validate_single_token_answers, continuation_answer_ids
 from src.provenance import (require_schema, admits, stamp, git_metadata,
                             VALIDATED, LEGACY, EXPLORATORY, E_DELTA, E_ABSOLUTE)
 from analyze_stats import (bh_fdr, paired, paired_by_key, cluster_boot, cluster_sign_p,
-                           crossed_boot, seed_stats, build_cell)
+                           crossed_boot, seed_stats, build_cell, claim_family)
 
 RNG = np.random.default_rng(0)
 NUMS = list(range(100))
@@ -568,10 +568,13 @@ def test_production_requires_frozen_layer_manifest():
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump({"schema_version": "2.3", "selection_protocol": "en_digit_heldout_r2",
                    "code_commit": g["code_commit"], "dirty_worktree": False,
-                   "models": {"M": {"selected_layer": 21}}}, fh)
+                   "models": {"M": {"selected_layer": 21,
+                                    "model_revision": {"name": "M", "revision": "deadbeef"}}}}, fh)
         path = fh.name
     layer, prov = resolve_layer("M", None, path, schema_version="2.3", production=True)
     assert layer == 21 and prov["layer_source"] == "frozen_manifest"
+    # Blocker #4: the frozen immutable revision must propagate so the runner pins the same snapshot.
+    assert prov["frozen_model_revision"] == "deadbeef"
     for kw, why in (({"schema_version": "9.9"}, "schema mismatch"),):
         try:
             resolve_layer("M", None, path, production=True, **kw)
@@ -583,6 +586,20 @@ def test_production_requires_frozen_layer_manifest():
         assert False, "must reject a model absent from the manifest"
     except ValueError:
         pass
+    # Blocker #4: a manifest entry with NO immutable revision must fail in production (a later job
+    # could otherwise silently load a different snapshot at the same code commit), but is fine in scratch.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump({"schema_version": "2.3", "selection_protocol": "en_digit_heldout_r2",
+                   "code_commit": g["code_commit"], "dirty_worktree": False,
+                   "models": {"M": {"selected_layer": 21}}}, fh)  # <- no model_revision
+        norev = fh.name
+    try:
+        resolve_layer("M", None, norev, schema_version="2.3", production=True)
+        assert False, "production must reject a manifest entry with no immutable model revision"
+    except ValueError:
+        pass
+    layer, prov = resolve_layer("M", None, norev, schema_version="2.3", production=False)
+    assert layer == 21 and prov["frozen_model_revision"] is None  # scratch tolerates it
 
 
 def test_overnight_runner_is_manifest_driven():
@@ -643,7 +660,7 @@ def test_register_cells_gates_necessity_by_clean_acc():
     import shutil
     import subprocess
     import tempfile
-    from src.provenance import write_manifest
+    from src.provenance import write_manifest, git_metadata
     d = tempfile.mkdtemp()
     try:
         write_manifest(d, run_id="t", schema_version=__import__("config").SCHEMA_VERSION,
@@ -651,7 +668,17 @@ def test_register_cells_gates_necessity_by_clean_acc():
                        expected_forms=["en_digit", "es_word"], allow_dirty=True)
         json.dump({"models": {"M": {"selected_layer": 14, "model_revision": {"revision": "r1"}}}},
                   open(os.path.join(d, "layers.json"), "w"))
-        json.dump({"M": {"en_digit": 0.95, "es_word": 0.10}}, open(os.path.join(d, "elig.json"), "w"))
+        # a REALISTIC eligibility artifact (the shape measure_clean.py emits); register_cells now
+        # strictly validates schema/type/config/revision + exact per-form coverage (r9 #3).
+        cases = [(a, b) for b in [1, 2, 3] for a in range(0, 10) if a + b <= 9]
+        n = len(cases)
+        json.dump({"schema_version": __import__("config").SCHEMA_VERSION,
+                   "experiment_type": "behavioral_eligibility", **git_metadata(),
+                   "addends": [1, 2, 3], "max_sum": 9,
+                   "models": {"M": {"model_revision": "r1", "forms": {
+                       "en_digit": {"clean_acc": 0.95, "n_expected": n, "n_processed": n},
+                       "es_word": {"clean_acc": 0.10, "n_expected": n, "n_processed": n}}}}},
+                  open(os.path.join(d, "elig.json"), "w"))
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         r = subprocess.run([sys.executable, os.path.join(root, "scripts/register_cells.py"),
                             "--run-dir", d, "--layers", os.path.join(d, "layers.json"),
@@ -674,10 +701,11 @@ def test_primary_necessity_position_is_single_family():
     """Blocker #4: only the primary position is FDR-corrected as primary; others are secondary."""
     import config as C
     assert C.PRIMARY_NECESSITY_POSITION not in C.SECONDARY_NECESSITY_POSITIONS
-    s = _src("scripts/analyze_stats.py")
-    assert "primary_necessity_position" in s
-    assert 'r.get("ablation_position") == args.primary_necessity_position' in s
-    assert '"secondary"' in s, "non-primary positions must be a distinct secondary family"
+    prim = C.PRIMARY_NECESSITY_POSITION
+    # exactly the primary position is 'primary'; every registered secondary position is 'secondary'
+    assert claim_family("necessity", prim, prim) == "primary"
+    for pos in C.SECONDARY_NECESSITY_POSITIONS:
+        assert claim_family("necessity", pos, prim) == "secondary", pos
 
 
 def test_analysis_policy_freezes_all_choices():
@@ -1042,6 +1070,379 @@ def test_answer_validation_clean_vs_multitoken():
         assert False, "continuation_answer_ids must fail-fast on multi-token digits"
     except ValueError:
         pass
+
+
+# ======================================================================================
+# Round-9 audit regression tests
+# ======================================================================================
+
+def _r9_write_layers_elig(d, forms_acc, revision="r1", layer=14):
+    """Write a layers.json + realistic behavioral_eligibility artifact for one model 'M'.
+    forms_acc maps form -> clean_acc. Returns (layers_path, elig_path)."""
+    import json
+    from src.provenance import git_metadata
+    json.dump({"schema_version": __import__("config").SCHEMA_VERSION,
+               "models": {"M": {"selected_layer": layer,
+                                "model_revision": {"revision": revision}}}},
+              open(os.path.join(d, "layers.json"), "w"))
+    cases = [(a, b) for b in [1, 2, 3] for a in range(0, 10) if a + b <= 9]
+    n = len(cases)
+    json.dump({"schema_version": __import__("config").SCHEMA_VERSION,
+               "experiment_type": "behavioral_eligibility", **git_metadata(),
+               "addends": [1, 2, 3], "max_sum": 9,
+               "models": {"M": {"model_revision": revision, "forms": {
+                   f: {"clean_acc": acc, "n_expected": n, "n_processed": n}
+                   for f, acc in forms_acc.items()}}}},
+              open(os.path.join(d, "elig.json"), "w"))
+    return os.path.join(d, "layers.json"), os.path.join(d, "elig.json")
+
+
+def _r9_register(d, transport_forms, necessity_forms):
+    """Run register_cells.py as the runner does; returns (jobs_lines, manifest)."""
+    import json
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, os.path.join(root, "scripts/register_cells.py"),
+                        "--run-dir", d, "--layers", os.path.join(d, "layers.json"),
+                        "--eligibility", os.path.join(d, "elig.json"),
+                        "--transport-forms", *transport_forms,
+                        "--necessity-forms", *necessity_forms],
+                       capture_output=True, text=True)
+    return r, json.load(open(os.path.join(d, "manifest.json"))) if r.returncode == 0 else None
+
+
+def test_r9_energy_bank_records_seed_provenance():
+    """Issue #9: the null control bank must record its ACTUAL builder seeds + basis hashes, not just
+    a candidate count, so the exact null geometry is reproducible/auditable."""
+    from src.patching import energy_matched_bank, helix_subspace_basis, fourier_basis
+    import numpy as np
+    rng = np.random.default_rng(0)
+    d_model, r = 64, 6
+    signal = np.linalg.qr(rng.standard_normal((d_model, r)))[0]
+    samples = rng.standard_normal((12, d_model))
+    _, rep = energy_matched_bank(samples, signal, r=r, d_model=d_model,
+                                 n_keep=4, n_candidates=20, seed=100)
+    for k in ("base_rng_seed", "n_candidates", "candidate_indices", "builder_seeds", "basis_hashes",
+              "kept_mean_proj_norm", "selection_scores", "selected_order", "implied_alpha"):
+        assert k in rep, f"seed-provenance report missing {k}"
+    assert rep["base_rng_seed"] == 100 and rep["n_candidates"] == 20
+    assert rep["n_kept"] == 4 == len(rep["builder_seeds"]) == len(rep["basis_hashes"])
+    # the ACTUAL builder seed is base + candidate index -- so the bank can be regenerated exactly
+    assert rep["builder_seeds"] == [100 + i for i in rep["candidate_indices"]]
+    assert all(isinstance(h, str) and len(h) == 16 for h in rep["basis_hashes"])
+    # kept in ascending selection score (best energy match first)
+    assert rep["selection_scores"] == sorted(rep["selection_scores"])
+    assert rep["selected_order"] == list(range(4))
+
+
+def test_r9_register_writes_one_file_cell_per_position_not_per_form():
+    """Blocker #2: with K eligible forms and P positions, necessity must yield P FILE cells (each
+    carrying all K forms), NOT P*K indistinguishable per-form cells."""
+    import shutil
+    import tempfile
+    from src.provenance import write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        write_manifest(d, run_id="t", schema_version=__import__("config").SCHEMA_VERSION,
+                       expected_models=["M"], expected_experiments=["transport", "necessity"],
+                       expected_forms=["en_digit", "es_word"], allow_dirty=True)
+        # BOTH forms behaviourally eligible -> tests that we do NOT fan out one cell per form
+        _r9_write_layers_elig(d, {"en_digit": 0.95, "es_word": 0.90})
+        r, man = _r9_register(d, ["en_digit", "es_word"], ["en_digit", "es_word"])
+        assert r.returncode == 0, r.stderr
+        nec = [c for c in man["expected_cells"] if c["experiment_type"] == "necessity"]
+        positions = {c["ablation_position"] for c in nec}
+        # primary 'after' + secondary last/span = 3 positions => exactly 3 necessity cells
+        assert len(nec) == len(positions) == 3, f"expected 3 file cells, got {len(nec)}"
+        for c in nec:
+            assert set(c["expected_forms"]) == {"en_digit", "es_word"}, "each cell carries all forms"
+        # exactly one primary position, two required_secondary
+        reqs = sorted(c["requirement"] for c in nec)
+        assert reqs == ["required_primary", "required_secondary", "required_secondary"], reqs
+        # necessity jobs are ONE line per position (not per form)
+        nec_jobs = [ln for ln in r.stdout.splitlines() if ln.startswith("necessity\t")]
+        assert len(nec_jobs) == 3, nec_jobs
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_register_fails_on_missing_eligibility_entry():
+    """Blocker #3: a requested necessity form absent from the eligibility artifact must FAIL
+    registration -- never be silently defaulted to accuracy 0 / ineligible."""
+    import shutil
+    import tempfile
+    from src.provenance import write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        write_manifest(d, run_id="t", schema_version=__import__("config").SCHEMA_VERSION,
+                       expected_models=["M"], expected_experiments=["transport", "necessity"],
+                       expected_forms=["en_digit", "es_word"], allow_dirty=True)
+        # eligibility only measured en_digit; es_word is REQUESTED but MISSING
+        _r9_write_layers_elig(d, {"en_digit": 0.95})
+        r, man = _r9_register(d, ["en_digit"], ["en_digit", "es_word"])
+        assert r.returncode != 0, "missing eligibility entry must fail, not default to 0"
+        assert "missing" in (r.stderr + r.stdout).lower()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_register_fails_on_partial_case_coverage():
+    """Blocker #3: an eligibility entry whose n_processed < n_expected must FAIL (a form measured on a
+    subset of cases is not a trustworthy competence signal)."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from src.provenance import write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        write_manifest(d, run_id="t", schema_version=__import__("config").SCHEMA_VERSION,
+                       expected_models=["M"], expected_experiments=["transport", "necessity"],
+                       expected_forms=["en_digit"], allow_dirty=True)
+        lp, ep = _r9_write_layers_elig(d, {"en_digit": 0.95})
+        e = json.load(open(ep))
+        e["models"]["M"]["forms"]["en_digit"]["n_processed"] -= 1   # one case unprocessed
+        json.dump(e, open(ep, "w"))
+        r, _ = _r9_register(d, ["en_digit"], ["en_digit"])
+        assert r.returncode != 0 and "processed" in (r.stderr + r.stdout).lower()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_validator_applies_forms_per_cell_not_global_union():
+    """Blocker #1: the manifest-level form union must NOT be applied to every file. A necessity file
+    carries fewer forms than transport; validating it against the transport union is the r8 bug."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion, E_DELTA, E_ABLATION
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(
+            d, run_id="t", schema_version="2.4", expected_models=["M"],
+            expected_experiments=["transport", "necessity"], expected_forms=["en_digit", "es_word"],
+            allow_dirty=True,
+            expected_cells=[
+                {"experiment_type": "transport", "model": "M", "estimand": E_DELTA, "layer": 14,
+                 "expected_forms": ["en_digit", "es_word"], "requirement": "required_primary"},
+                {"experiment_type": "necessity", "model": "M", "estimand": E_ABLATION, "layer": 14,
+                 "ablation_position": "after", "expected_forms": ["en_digit"],
+                 "requirement": "required_primary"}])
+        record_completion(d, "transport:M", "ok")
+        record_completion(d, "necessity:M:after", "ok")
+        cm = man["code_commit"]
+        base = {"model": "M", "schema_version": "2.4", "analysis_status": "validated",
+                "model_revision": {"name": "M", "revision": "r1"}, "code_commit": cm,
+                "dirty_worktree": False, "all_cases_processed": True, "layer": 14}
+        tp = {**base, "experiment_type": "transport", "estimand": E_DELTA,
+              "results": {"en_digit": {"n_cases": 8}, "es_word": {"n_cases": 8}}}
+        # necessity file has ONLY en_digit -- correct against its own cell, wrong against the union
+        nec = {**base, "experiment_type": "necessity", "estimand": E_ABLATION,
+               "ablation_position": "after", "baseline_policy": man["baseline_policy"],
+               "ablation": {"en_digit": {"clean_acc": 0.95, "n": 8}}}
+        validate_run_dir(d, [("tp.json", tp), ("nec.json", nec)])   # must PASS
+
+        # now the necessity file carries an EXTRA form its cell never registered -> must fail
+        nec_bad = {**nec, "ablation": {"en_digit": {"clean_acc": 0.95, "n": 8},
+                                       "es_word": {"clean_acc": 0.9, "n": 8}}}
+        try:
+            validate_run_dir(d, [("tp.json", tp), ("nec.json", nec_bad)])
+            assert False, "per-cell form set must be enforced"
+        except ValueError as e:
+            assert "expected" in str(e)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_unexpected_clean_acc_fails_but_preregistered_ineligible_is_fine():
+    """Blocker #6: a necessity form registered ELIGIBLE that reads below threshold in the RESULT is an
+    unexpected behavioural failure and must fail production; a form listed in
+    necessity_ineligible_forms is a preregistered not-testable and must be tolerated."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion, E_ABLATION
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(
+            d, run_id="t", schema_version="2.4", expected_models=["M"],
+            expected_experiments=["necessity"], expected_forms=["en_digit"],
+            allow_dirty=True, necessity_ineligible_forms={"M:fullwidth_digit": {"clean_acc": 0.1}},
+            expected_cells=[{"experiment_type": "necessity", "model": "M", "estimand": E_ABLATION,
+                             "layer": 14, "ablation_position": "after",
+                             "expected_forms": ["en_digit"], "requirement": "required_primary"}])
+        record_completion(d, "necessity:M:after", "ok")
+        cm = man["code_commit"]
+        base = {"model": "M", "schema_version": "2.4", "analysis_status": "validated",
+                "model_revision": {"name": "M", "revision": "r1"}, "code_commit": cm,
+                "dirty_worktree": False, "all_cases_processed": True, "layer": 14,
+                "experiment_type": "necessity", "estimand": E_ABLATION,
+                "ablation_position": "after", "baseline_policy": man["baseline_policy"]}
+        thr = man["analysis_policy"]["clean_accuracy_threshold"]
+        # eligible form reads FINE -> passes
+        validate_run_dir(d, [("nec.json", {**base, "ablation": {"en_digit": {"clean_acc": 0.95, "n": 8}}})])
+        # eligible form reads BELOW threshold -> unexpected failure -> reject
+        try:
+            validate_run_dir(d, [("nec.json", {**base,
+                              "ablation": {"en_digit": {"clean_acc": thr - 0.2, "n": 8}}})])
+            assert False, "an eligible form that fails behaviourally must be rejected"
+        except ValueError as e:
+            assert "unexpected" in str(e).lower() or "registered" in str(e).lower()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_layer_manifest_revision_crosschecked_against_results():
+    """Blocker #4: the validator must reject a result whose loaded model revision disagrees with the
+    frozen layer manifest (a job that silently loaded a different snapshot)."""
+    import json
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion, E_DELTA
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(
+            d, run_id="t", schema_version="2.4", expected_models=["M"],
+            expected_experiments=["transport"], expected_forms=["en_digit"], allow_dirty=True,
+            expected_cells=[{"experiment_type": "transport", "model": "M", "estimand": E_DELTA,
+                             "layer": 14, "expected_forms": ["en_digit"],
+                             "requirement": "required_primary"}])
+        record_completion(d, "transport:M", "ok")
+        json.dump({"schema_version": "2.4",
+                   "models": {"M": {"selected_layer": 14, "model_revision": {"revision": "GOOD"}}}},
+                  open(os.path.join(d, "layers.json"), "w"))
+        cm = man["code_commit"]
+        base = {"model": "M", "schema_version": "2.4", "analysis_status": "validated",
+                "code_commit": cm, "dirty_worktree": False, "all_cases_processed": True,
+                "layer": 14, "experiment_type": "transport", "estimand": E_DELTA,
+                "results": {"en_digit": {"n_cases": 8}}}
+        validate_run_dir(d, [("tp.json", {**base, "model_revision": {"name": "M", "revision": "GOOD"}})])
+        try:
+            validate_run_dir(d, [("tp.json", {**base, "model_revision": {"name": "M", "revision": "WRONG"}})])
+            assert False, "a result whose revision != layer manifest must be rejected"
+        except ValueError as e:
+            assert "layer-manifest" in str(e)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_r9_blocker5_family_classification_matches_frozen_config():
+    """Blocker #5: the family classifier must follow C.PRIMARY_FAMILIES / C.SECONDARY_FAMILIES exactly,
+    not a hard-coded DEFAULT_CLAIMS list. Assert the full preregistered decision table."""
+    import config as C
+    prim = C.PRIMARY_NECESSITY_POSITION
+    sec = C.SECONDARY_NECESSITY_POSITIONS[0]
+    # delta_vs_shuf_fourier is PRIMARY; delta_vs_pca_span and Haar delta_transport are SECONDARY
+    assert claim_family("delta_vs_shuf_fourier", None, prim) == "primary"
+    assert claim_family("delta_vs_pca_span", None, prim) == "secondary"
+    assert claim_family("delta_transport", None, prim) == "secondary"
+    # necessity: PRIMARY only at the frozen primary position; other registered positions are SECONDARY
+    assert claim_family("necessity", prim, prim) == "primary"
+    assert claim_family("necessity", sec, prim) == "secondary"
+    # this test would have caught the old bug where every non-necessity DEFAULT_CLAIM was primary
+    assert claim_family("delta_vs_pca_span", None, prim) != "primary"
+
+
+def test_r9_interchange_is_optin_not_secondary():
+    """Blocker #5 / scientific soundness: interchange is undercontrolled (Haar-only null, no alpha
+    diagnostics) so it is opt-in EXPLORATORY, never a preregistered secondary family. Config must not
+    list it, and the classifier must return 'optin' (never a secondary-FDR stamp)."""
+    import config as C
+    assert "interchange" not in C.SECONDARY_FAMILIES, "interchange must not be a preregistered family"
+    assert "interchange" not in C.PRIMARY_FAMILIES
+    assert claim_family("interchange", "last", C.PRIMARY_NECESSITY_POSITION) == "optin"
+    # the other legacy/exploratory claims are opt-in too
+    assert claim_family("sufficiency", None, C.PRIMARY_NECESSITY_POSITION) == "optin"
+    assert claim_family("necessity_peak", "after", C.PRIMARY_NECESSITY_POSITION) == "optin"
+
+
+def test_r9_dropped_required_secondary_rejects_production():
+    """Issue #7: 'required' = a primary family OR a registered SECONDARY necessity position. A dropped
+    secondary necessity position must reject production; control-family (haar/pca_span) admissibility
+    drops must NOT, since those are legitimately conditional."""
+    s = _src("scripts/analyze_stats.py")
+    # the requirement classifier delegates to the SAME claim_family() used for reporting (no drift)
+    assert "def dropped_requirement(d):" in s
+    assert "fam = claim_family(base, d.get(\"ablation_position\"), args.primary_necessity_position)" in s
+    assert 'if fam == "secondary" and base == "necessity":' in s
+    # production rejects on ANY dropped_required, not only dropped_primary
+    assert 'dropped_required = [d for d in dropped if d["requirement"] is not None]' in s
+    assert "if args.production and dropped_required:" in s
+
+
+def test_r9_end_to_end_register_then_validate():
+    """Issue #11: full admission path -- write_manifest -> register_cells -> synthesize the exact
+    result files the emitted jobs imply -> validate_run_dir must PASS; and a run missing one
+    registered secondary-position file must FAIL."""
+    import json
+    import shutil
+    import tempfile
+    from src.provenance import (validate_run_dir, write_manifest, record_completion,
+                                E_DELTA, E_ABLATION)
+    d = tempfile.mkdtemp()
+    try:
+        man0 = write_manifest(
+            d, run_id="e2e", schema_version=__import__("config").SCHEMA_VERSION,
+            expected_models=["M"], expected_experiments=["transport", "necessity"],
+            expected_forms=["en_digit", "es_word", "fullwidth_digit"], allow_dirty=True)
+        # en_digit + es_word competent; fullwidth_digit below threshold -> preregistered not-testable
+        _r9_write_layers_elig(d, {"en_digit": 0.95, "es_word": 0.9, "fullwidth_digit": 0.2})
+        r, man = _r9_register(d, ["en_digit", "es_word", "fullwidth_digit"],
+                              ["en_digit", "es_word", "fullwidth_digit"])
+        assert r.returncode == 0, r.stderr
+        assert "M:fullwidth_digit" in man["necessity_ineligible_forms"]
+
+        cm = man["code_commit"]
+        base = {"model": "M", "schema_version": man["schema_version"], "analysis_status": "validated",
+                "model_revision": {"name": "M", "revision": "r1"}, "code_commit": cm,
+                "dirty_worktree": False, "all_cases_processed": True, "layer": 14,
+                "fit_values": man["experiment_policy"]["fit_values"],
+                "causal_values": man["experiment_policy"]["causal_values"]}
+        results = []
+        # build EXACTLY the files each emitted job implies
+        for ln in r.stdout.splitlines():
+            if ln.startswith("transport\t"):
+                _, model, layer, forms = ln.split("\t")
+                results.append((f"transport_{model}.json",
+                    {**base, "experiment_type": "transport", "estimand": E_DELTA,
+                     "layer": int(layer),
+                     "results": {f: {"n_cases": 8} for f in forms.split()}}))
+                record_completion(d, f"transport:{model}", "ok")
+            elif ln.startswith("necessity\t"):
+                _, model, layer, pos, forms = ln.split("\t")
+                results.append((f"necessity_{model}_{pos}.json",
+                    {**base, "experiment_type": "necessity", "estimand": E_ABLATION,
+                     "layer": int(layer), "ablation_position": pos,
+                     "baseline_policy": man["baseline_policy"],
+                     "ablation": {f: {"clean_acc": 0.95, "n": 8} for f in forms.split()}}))
+                record_completion(d, f"necessity:{model}:{pos}", "ok")
+        # ineligible fullwidth_digit must NOT appear in any necessity payload
+        for nm, res in results:
+            if res["experiment_type"] == "necessity":
+                assert "fullwidth_digit" not in res["ablation"], "not-testable form must be excluded"
+        validate_run_dir(d, results)   # full run must PASS
+
+        # drop one registered secondary-position necessity file -> validation must FAIL
+        dropped_one = [(nm, res) for nm, res in results
+                       if not (res["experiment_type"] == "necessity"
+                               and res["ablation_position"] == "span")]
+        try:
+            validate_run_dir(d, dropped_one)
+            assert False, "a missing registered secondary-position cell must fail validation"
+        except ValueError as e:
+            assert "missing" in str(e).lower()
+
+        # a STALE/unexpected result file not registered in the manifest must FAIL (Issue #11)
+        stale = dict(results[0][1])
+        stale["ablation_position"] = "penultimate"   # a position no cell registered
+        stale = {**stale, "experiment_type": "necessity", "estimand": E_ABLATION,
+                 "baseline_policy": man["baseline_policy"],
+                 "ablation": {"en_digit": {"clean_acc": 0.95, "n": 8}}}
+        try:
+            validate_run_dir(d, results + [("stale_necessity_penultimate.json", stale)])
+            assert False, "an unexpected result cell not in the manifest must fail validation"
+        except ValueError as e:
+            assert "unexpected" in str(e).lower() or "not in manifest" in str(e).lower()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

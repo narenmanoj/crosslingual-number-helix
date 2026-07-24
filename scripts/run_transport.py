@@ -173,6 +173,11 @@ def main():
             "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + 1 + i)
                              for i in ctrl_seeds],
         }
+        # record the ACTUAL subspace-generation seeds here too, so control_bank_selection carries honest
+        # seed provenance in BOTH paths, not just the energy-matched one (audit r9 #9).
+        for fam in ctrl_banks:
+            bank_reports[fam] = {"selection": "unmatched_random", "base_rng_seed": args.seed + 1,
+                                 "builder_seeds": [args.seed + 1 + i for i in ctrl_seeds]}
     for fam, rep in bank_reports.items():
         print(f"  control bank [{fam}]: kept {rep['n_kept']}/{rep['n_candidates']} candidates, "
               f"implied alpha {np.round(rep['implied_alpha'], 2).tolist()}")
@@ -344,7 +349,9 @@ def main():
             "all_cases_processed": len(skipped_keys) == 0,
             # full case x seed control matrices -- never only the mean (audit r4 #4)
             "delta_control_by_seed": ctrl_by_seed,
-            "control_seeds": ctrl_seeds,
+            # NB: these are seed INDICES; the ACTUAL subspace-generation seeds are in
+            # control_bank_selection[fam]["builder_seeds"] (audit r9 #9).
+            "control_seed_indices": ctrl_seeds,
             # FULL per-(case, seed) norm-match diagnostics + the predefined admissibility flag, so the
             # analysis can run primary-on-admissible / sensitivity-on-all (audit r5 #6)
             "control_diagnostics": diag,

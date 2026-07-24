@@ -65,7 +65,13 @@ def main():
     for name in args.models:
         print(f"\n=== {name} ===")
         model, tok, device = load_model(name, args.device)
-        rev = getattr(model, '_pinned_revision', None)
+        mr = model_revision(model, name, revision=getattr(model, "_pinned_revision", None))
+        # BLOCKER 4: production requires an IMMUTABLE model id (pinned Hub sha, else resolved config
+        # commit hash). Without one, later jobs could load a different snapshot at the same code commit.
+        from src.provenance import model_commit
+        if not args.allow_dirty and model_commit({"model_revision": mr}) is None:
+            raise SystemExit(f"\n{name}: could not resolve an immutable model revision. Production "
+                             "requires a pinned snapshot; run offline only with --allow-dirty (scratch).\n")
         n_layers = model.config.num_hidden_layers
         # en_digit ONLY, discovery numbers ONLY -- nothing about other forms is visible here
         acts = extract_form_activations(model, tok, device,
@@ -80,7 +86,7 @@ def main():
               f"from {len(candidates)} candidates")
         models[name] = {"selected_layer": sel["selected_layer"],
                         "heldout_r2": best["heldout_r2"],
-                        "model_revision": model_revision(model, name, revision=rev),
+                        "model_revision": mr,
                         "per_layer": sel["per_layer"]}
         del model
         try:

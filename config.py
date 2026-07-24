@@ -20,8 +20,12 @@ SCHEMA_VERSION = "2.4"
 
 # PREREGISTERED multiple-testing families (audit r6 #11): declared here, in code, BEFORE any run --
 # never chosen after inspecting results. The production manifest records these verbatim.
+# NB (audit r9 #5): interchange is NOT a preregistered secondary family. Its null is Haar-only with no
+# energy-matched bank or alpha diagnostics, so it is strictly weaker than delta transport (which already
+# supplies the sufficiency test). It is opt-in EXPLORATORY (analyze_stats OPTIN_CLAIMS) -- listing it as
+# secondary would give an undercontrolled claim a secondary-FDR stamp, contradicting its opt-in status.
 PRIMARY_FAMILIES = ["delta_vs_shuf_fourier", "necessity"]
-SECONDARY_FAMILIES = ["delta_vs_pca_span", "delta_transport", "interchange"]
+SECONDARY_FAMILIES = ["delta_vs_pca_span", "delta_transport"]
 
 # ONE primary necessity position (audit r8 #4). Testing last/span/after as three separate FDR families
 # inflates the chance one looks significant; `after` is the cleanest single-position test of an

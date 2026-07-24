@@ -850,6 +850,61 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,
   since this space moves monthly.
 
+**Round 9 (production-orchestration audit) — all 6 blockers + issues 7–11 closed; still schema 2.4:**
+The round-8 orchestration code I added had two deterministic bugs that made a normal multi-form
+necessity run fail validation; those plus four more blockers and five issues are now fixed.
+- ✅ **B1 Per-cell form sets, not a global union.** The manifest no longer applies
+  `union(transport, necessity)` forms to every file. Each expected cell carries its own
+  `expected_forms`; after 1:1 matching the validator checks `set(payload) == set(cell.expected_forms)`.
+  A necessity file (fewer forms than transport) validates against its own cell, not the union.
+- ✅ **B2 One file-level necessity cell per position (not one per form).** `register_cells.py` writes a
+  single `(model, layer, position, estimand)` cell with the eligible-form list attached, instead of
+  looping over forms and creating N indistinguishable cells that one file matched ambiguously.
+  With K eligible forms × P positions ⇒ **P** cells, not P·K.
+- ✅ **B3 Stamped, strictly-validated eligibility artifact.** `measure_clean.py` emits a
+  `behavioral_eligibility` artifact (schema, commit, dirty flag, layers-hash, readout, addends,
+  max_sum, per-form `clean_acc`/`n_expected`/`n_processed`, pinned revision). `register_cells.py`
+  **fails** on a missing model/form, non-finite accuracy, partial case coverage, or config/commit/
+  revision mismatch — a missing entry is never silently defaulted to accuracy 0.
+- ✅ **B4 Immutable model revision required + cross-checked everywhere.** `select_layers` refuses to
+  freeze without an immutable id; `resolve_layer` falls back revision → config-commit → content-hash
+  and **raises in production** if none; the validator cross-checks each result's revision against the
+  frozen **layer manifest** (not only against sibling results).
+- ✅ **B5 Primary/secondary families come from `config`, not a hard-coded `DEFAULT_CLAIMS`.** A single
+  `claim_family()` is the source of truth for reporting, FDR, headline gating, and dropped-cell
+  semantics. `delta_vs_shuf_fourier` + primary-position necessity = primary; `delta_vs_pca_span`,
+  Haar `delta_transport`, secondary necessity positions = secondary; everything else opt-in.
+  **Also fixed (soundness):** `interchange` was wrongly listed in `SECONDARY_FAMILIES` — it is
+  undercontrolled (Haar-only null, no α diagnostics) and is now opt-in exploratory, so it can never
+  receive a secondary-FDR stamp.
+- ✅ **B6 An unexpectedly-failed eligible form rejects production.** A necessity result whose
+  `clean_acc` reads below threshold for a form **not** preregistered in `necessity_ineligible_forms`
+  is an unexpected behavioural failure (revision/tokenizer/nondeterminism) and fails validation —
+  distinct from a preregistered not-testable form, which is tolerated.
+- ✅ **I7 Registered secondary cells are required.** Cells are tagged `required_primary` /
+  `required_secondary` / `optional`; production rejects a dropped required-**secondary** necessity
+  position, while control-family admissibility drops (Haar/pca_span) remain legitimately conditional.
+- ✅ **I8 Writer-side experiment policy frozen.** `register_cells.py` writes an `experiment_policy`
+  block (fit/causal values, addends, max_sum, exhaustive, k_pca, control-seed/candidate counts, rng
+  seed, readout); writers stamp `fit_values`/`causal_values`/`case_set_exhaustive` and the validator
+  cross-checks them.
+- ✅ **I9 Honest control-bank seed provenance.** `energy_matched_bank` records base RNG seed, actual
+  builder seeds, candidate indices, basis hashes, selection scores, and order. Transport's old
+  `control_seeds: [0,1,…]` is relabelled `control_seed_indices` (the real seeds live in
+  `control_bank_selection[fam].builder_seeds`, populated in **both** the energy-matched and fallback
+  paths); necessity records `control_base_seed` + `control_builder_seeds` for its positional per-seed
+  arrays.
+- ✅ **I10 Interchange no longer recomputed 3×.** `run_necessity.py --interchange` defaults **off**;
+  the en_arith cache + interchange loop/report are gated behind it and the production runner omits it.
+- ✅ **I11 End-to-end integration test.** `write_manifest → register_cells → synthesize the exact
+  files the emitted jobs imply → validate_run_dir` passes for a normal run (different transport/
+  necessity form sets, multiple eligible forms in one file, a preregistered-ineligible form, 3
+  positions) and fails on a missing secondary cell and on a stale/unregistered file.
+- **Tests 64 → 75** (nine `test_r9_*` regressions + two strengthened). All 75 pass; every script
+  passes `--help`; `run_overnight.sh` passes `bash -n`.
+- ☐ **Still required before pilot:** a real one-model smoke run on GPU (Gate B) — the gates are
+  validated only via synthetic run-dirs so far; MPS is too slow for a live end-to-end here.
+
 ## Roadmap
 - [x] Step 1 — reproduce the helix fit per form
 - [x] Step 2 — cross-form subspace alignment + Procrustes-CV + CKA (the go/no-go signal)

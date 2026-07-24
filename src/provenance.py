@@ -134,13 +134,17 @@ def resolve_layer(model: str, layer_arg, manifest_path: str = None, schema_versi
         entry = (man.get("models") or {}).get(model)
         if entry is None:
             raise ValueError(f"{manifest_path}: no frozen layer for {model!r}")
+        frozen_rev = model_commit(entry)          # revision -> commit_hash -> content_hash (r9 #4)
+        if production and frozen_rev is None:
+            raise ValueError(f"{manifest_path}: no immutable model revision for {model!r} -- "
+                             "production requires a pinned snapshot")
         return int(entry["selected_layer"]), {
             "layer_source": "frozen_manifest", "layer_manifest": os.path.basename(manifest_path),
             "selection_protocol": man.get("selection_protocol"),
             "discovery_numbers": man.get("discovery_numbers"),
             "evaluation_numbers": man.get("evaluation_numbers"),
             "selection_frozen_before_crossform_evaluation": True,
-            "frozen_model_revision": (entry.get("model_revision") or {}).get("revision"),  # r8 #7
+            "frozen_model_revision": frozen_rev,   # r8 #7 / r9 #4
             "manifest_commit": man.get("code_commit")}
     if production:
         raise ValueError("production runs require --layer-manifest (hand-picked layers are not "
@@ -178,10 +182,11 @@ def cell_matches(expected: dict, cell: tuple) -> bool:
 
 
 def model_commit(d: dict):
-    """The pinned model snapshot for a result file (audit r8 #7): the HF revision/commit, not the code
-    commit. None when unrecorded, which production treats as a failure."""
+    """The immutable model snapshot for a result file (audit r8 #7, r9 #4): the pinned HF revision,
+    else the resolved config commit hash, else (local models) a recorded content hash. NOT the code
+    commit. None when nothing immutable was recorded -- which production treats as a failure."""
     mr = d.get("model_revision") or {}
-    return mr.get("revision") or mr.get("commit") or mr.get("sha")
+    return mr.get("revision") or mr.get("commit_hash") or mr.get("content_hash")
 
 
 def default_analysis_policy(**over) -> dict:
@@ -302,6 +307,26 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
                     {tuple(k) for k in dk} != {tuple(k) for k in exp}:
                 problems.append(f"{name}[{form}]: {len(exp) - len(dk)} case(s) missing from the "
                                 "matched-delta arrays (incomplete en_digit reference coverage)")
+        # r9 #6: a necessity form REGISTERED as eligible that reads below threshold in the RESULT is an
+        # UNEXPECTED failure (revision/tokenizer/nondeterminism), NOT a preregistered not-testable form.
+        if d.get("experiment_type") == "necessity":
+            thr = (man.get("analysis_policy") or {}).get("clean_accuracy_threshold", 0.8)
+            ineligible = set(man.get("necessity_ineligible_forms") or {})
+            for form, A in (d.get("ablation") or {}).items():
+                key = f"{d.get('model')}:{form}"
+                acc = A.get("clean_acc")
+                if acc is not None and acc < thr and key not in ineligible:
+                    problems.append(f"{name}[{form}]: clean_acc {acc:.2f} < {thr} but was registered "
+                                    "ELIGIBLE -- unexpected behavioural failure (not preregistered)")
+        # r9 #8: writer metadata must match the frozen experiment policy
+        ep = man.get("experiment_policy") or {}
+        if ep:
+            checks = {"fit_values": d.get("fit_values"), "causal_values": d.get("causal_values")}
+            for k, got in checks.items():
+                if got is not None and ep.get(k) is not None and list(got) != list(ep[k]):
+                    problems.append(f"{name}: {k} {got} != frozen experiment_policy {ep[k]}")
+            if d.get("case_set_exhaustive") is False and ep.get("exhaustive_cases"):
+                problems.append(f"{name}: sampled cases but experiment_policy requires exhaustive")
         # zero-fallback baseline policy (r6 blocker #6)
         for form, A in (d.get("ablation") or {}).items():
             if A.get("n_skipped_no_baseline"):
@@ -310,14 +335,12 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
                 if any(v.get("fallback_used") for v in pm.values()):
                     problems.append(f"{name}[{form}]: baseline fallback used")
                     break
-        # NON-EMPTY payload + expected forms present (r7 blocker #5). The old check was `if got and
-        # not subset`, so an EMPTY results/ablation dict silently satisfied it.
+        # NON-EMPTY payload (r7 #5). Per-cell form validation happens after 1:1 matching below (r9 #1):
+        # the manifest-level union must NOT be applied to every file, or a necessity file (fewer forms)
+        # is wrongly rejected against the transport form set.
         payload = d.get("results") or d.get("ablation") or {}
         if not payload:
             problems.append(f"{name}: empty results/ablation payload")
-        want_forms = set(man.get("expected_forms") or [])
-        if want_forms and not want_forms.issubset(set(payload)):
-            problems.append(f"{name}: missing expected forms {sorted(want_forms - set(payload))}")
         # every present form must have actually processed cases (r7 blockers #5/#10)
         for form, blk in payload.items():
             n_cases = blk.get("n_cases", blk.get("n"))
@@ -348,19 +371,41 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
             problems.append(f"{m}: results used DIFFERENT model revisions {sorted(real)} "
                             "(weights/tokenizer changed between jobs)")
 
+    # layer-manifest revision must equal what every job actually loaded (r9 #4)
+    layer_rev = None
+    lpath = os.path.join(run_dir, "layers.json")
+    if os.path.exists(lpath):
+        lm = json.load(open(lpath))
+        revs = {(v.get("model_revision") or {}).get("revision") for v in (lm.get("models") or {}).values()}
+        for name, d in results:
+            m = d.get("model") or (d.get("model_revision") or {}).get("name")
+            lr = ((lm.get("models") or {}).get(m) or {}).get("model_revision", {}).get("revision")
+            if lr is not None and model_commit(d) is not None and lr != model_commit(d):
+                problems.append(f"{name}: model revision {model_commit(d)} != layer-manifest {lr}")
+
     expected = man.get("expected_cells") or []
+    obs_by_name = {result_cell_id(d): (nm, d) for nm, d in results}
     if expected and strict_cells:
         observed = list(cells)
-        # ONE-TO-ONE assignment (audit r8 #6): every expected cell matches exactly one observed cell
-        # and vice versa. Matching only "some field is present" let two result files (e.g. two layers)
-        # both satisfy one under-specified expected cell.
+        # ONE-TO-ONE assignment (r8 #6): every expected cell matches exactly one observed cell and
+        # vice versa. Then per-cell FORM validation and required-secondary completeness (r9 #1/#7).
         for spec in expected:
             hits = [c for c in observed if cell_matches(spec, c)]
             if len(hits) == 0:
-                problems.append(f"expected cell missing: {spec}")
+                if spec.get("requirement", "required_primary") != "optional":
+                    problems.append(f"expected cell missing: {spec}")
             elif len(hits) > 1:
-                problems.append(f"expected cell matched by {len(hits)} results (under-specified? "
-                                f"add layer): {spec} -> {hits}")
+                problems.append(f"expected cell matched by {len(hits)} results (under-specified?): "
+                                f"{spec} -> {hits}")
+            else:
+                nm, d = obs_by_name.get(hits[0], (None, None))
+                if d is not None and spec.get("expected_forms") is not None:
+                    got = set((d.get("results") or d.get("ablation") or {}).keys())
+                    want = set(spec["expected_forms"])
+                    if got != want:
+                        problems.append(f"{nm}: payload forms {sorted(got)} != expected "
+                                        f"{sorted(want)} for cell {spec.get('experiment_type')}"
+                                        f"@{spec.get('ablation_position', '')}")
         for c in observed:
             hits = [spec for spec in expected if cell_matches(spec, c)]
             if len(hits) == 0:

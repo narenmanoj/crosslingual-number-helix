@@ -56,6 +56,22 @@ CLAIM_ORDER = ["delta_vs_shuf_fourier", "delta_vs_pca_span", "delta_transport",
                "necessity", "interchange", "necessity_peak", "sufficiency"]
 
 
+def claim_family(base, ablation_position, primary_necessity_position):
+    """Preregistered multiple-testing family for a claim base (audit r9 #5). Single source of truth so
+    reporting, FDR, headline gating, and dropped-cell semantics can never disagree:
+      * PRIMARY   = C.PRIMARY_FAMILIES; for necessity ONLY at the frozen primary position;
+      * SECONDARY = C.SECONDARY_FAMILIES + necessity at a non-primary registered position;
+      * OPTIN     = everything else (legacy/interchange/sweeps) -- reported, never FDR-corrected here.
+    Returns 'primary' | 'secondary' | 'optin'."""
+    if base in C.PRIMARY_FAMILIES:
+        if base == "necessity":
+            return "primary" if ablation_position == primary_necessity_position else "secondary"
+        return "primary"
+    if base in C.SECONDARY_FAMILIES:
+        return "secondary"
+    return "optin"
+
+
 # ----------------------------- inference primitives -----------------------------
 
 def cluster_boot(diff, groups, B, seed=0, alpha=0.05):
@@ -548,29 +564,29 @@ def main():
         print(msg)
         return
 
-    # ---------------- FDR over the DEFAULT family only (opt-in claims excluded) ----------------
-    # PREREGISTERED FAMILIES. Each claim base is one BH family. For NECESSITY the three intervention
-    # positions are NOT three families (audit r8 #4): only `--primary-necessity-position` is primary
-    # and enters FDR; the others are secondary sensitivity rows (marked, never headline). Testing three
-    # and taking the best would inflate the family-wise error.
-    def is_primary(r):
-        base = r["claim"].split("@")[0]
-        if base != "necessity":
-            return base in DEFAULT_CLAIMS
-        return r.get("ablation_position") == args.primary_necessity_position
+    # ---------------- PREREGISTERED FAMILIES from config (audit r9 #5) ----------------
+    # PRIMARY is exactly C.PRIMARY_FAMILIES (delta_vs_shuf_fourier + primary-position necessity). Haar
+    # delta_transport, delta_vs_pca_span, and the secondary necessity positions are SECONDARY -- they
+    # must NOT be counted as headline positives or enter the primary FDR family, or the report would
+    # contradict the frozen configuration.
+    def family_of(r):
+        return claim_family(r["claim"].split("@")[0], r.get("ablation_position"),
+                            args.primary_necessity_position)
     for r in rows:
-        r["family"] = "primary" if is_primary(r) else (
-            "secondary" if r["claim"].split("@")[0] in DEFAULT_CLAIMS else "optin")
+        r["family"] = family_of(r)
     default_rows = [r for r in rows if r["family"] == "primary"]
     for claim in {r["claim"].split("@")[0] for r in default_rows}:
         cr = [r for r in default_rows if r["claim"].split("@")[0] == claim]
         reject, q = bh_fdr([r["perm_p"] for r in cr], alpha=args.alpha)
         for r, rj, qq in zip(cr, reject, q):
             r["q"], r["sig_fdr"] = float(qq), bool(rj)
-    # secondary necessity positions get their own JOINT BH correction (a sensitivity analysis, not a
-    # headline), so they are still reported honestly rather than silently uncorrected.
-    sec = [r for r in rows if r["family"] == "secondary" and r["claim"].split("@")[0] == "necessity"]
-    if sec:
+    # secondary families each get their own BH correction (a sensitivity analysis, not a headline) so
+    # they are reported honestly rather than silently uncorrected. Necessity secondary positions are
+    # pooled together; each secondary claim base (delta_vs_pca_span, delta_transport) is its own family.
+    def sec_family(r):
+        return "necessity_secondary" if r["claim"].split("@")[0] == "necessity" else r["claim"].split("@")[0]
+    for fam in {sec_family(r) for r in rows if r["family"] == "secondary"}:
+        sec = [r for r in rows if r["family"] == "secondary" and sec_family(r) == fam]
         rej_s, q_s = bh_fdr([r["perm_p"] for r in sec], alpha=args.alpha)
         for r, rj, qq in zip(sec, rej_s, q_s):
             r["q"], r["sig_fdr"] = float(qq), bool(rj)
@@ -633,28 +649,38 @@ def main():
                 for c in present)
             print(f"  {mdl[:23]:<24}{cells}")
 
-    # ---------------- BLOCKER 4: dropped primary cells invalidate a production run -------------
-    # A dropped cell is "primary" only if it WOULD have been in the primary family: a primary claim
-    # base, and for necessity the primary position. A preregistered-ineligible necessity form is not a
-    # failure -- it is recorded as not_testable and excluded from the denominator (audit r8 #2).
-    def dropped_is_primary(d):
-        base = d["claim"].split("@")[0]
+    # ---------------- dropped REQUIRED cells invalidate a production run (r8 #4 + r9 #7) ----------
+    # Required = primary family OR a registered secondary NECESSITY position. NOT required: a
+    # preregistered-not-testable form, or a control-admissibility drop of a secondary transport family
+    # (Haar delta_transport / delta_vs_pca_span) -- those are data-dependent by design, not missing.
+    def dropped_requirement(d):
         if d.get("not_testable"):
-            return False
-        if base == "necessity":
-            return d.get("ablation_position") == args.primary_necessity_position
-        return base in C.PRIMARY_FAMILIES
-    dropped_primary = [d for d in dropped if dropped_is_primary(d)]
+            return None                # a preregistered-not-testable form is not a required cell
+        base = d["claim"].split("@")[0]
+        fam = claim_family(base, d.get("ablation_position"), args.primary_necessity_position)
+        if fam == "primary":
+            return "primary"
+        # A registered secondary NECESSITY position is required (issue #7); a secondary transport
+        # control family (Haar delta_transport / delta_vs_pca_span) may legitimately drop on
+        # control admissibility, so it is NOT a required cell.
+        if fam == "secondary" and base == "necessity":
+            return "secondary"
+        return None
+    for d in dropped:
+        d["requirement"] = dropped_requirement(d)
+    dropped_required = [d for d in dropped if d["requirement"] is not None]
+    dropped_primary = [d for d in dropped_required if d["requirement"] == "primary"]
     if dropped:
-        print(f"\nDROPPED CELLS ({len(dropped)}; {len(dropped_primary)} in a PRIMARY family):")
+        print(f"\nDROPPED CELLS ({len(dropped)}; {len(dropped_required)} required):")
         for d in dropped:
-            mark = "PRIMARY" if d in dropped_primary else "       "
-            print(f"  [{mark}] {d['claim']:<22}{d['model']:<20}{d['form']:<18}{d['reason']}")
-    if args.production and dropped_primary:
+            mark = (d["requirement"] or "optional").upper()[:9]
+            print(f"  [{mark:<9}] {d['claim']:<22}{d['model']:<20}{d['form']:<18}{d['reason']}")
+    if args.production and dropped_required:
         raise SystemExit(
-            f"\nPRODUCTION RUN REJECTED: {len(dropped_primary)} primary analysis cell(s) were dropped "
-            "-- a report cannot silently omit cells from its own denominator. Fix the underlying "
-            "cause (controls / clean accuracy / case coverage) or preregister the omission.\n")
+            f"\nPRODUCTION RUN REJECTED: {len(dropped_required)} required analysis cell(s) were dropped "
+            f"({len(dropped_primary)} primary) -- a report cannot silently omit registered cells from "
+            "its denominator. Fix the cause (controls / clean accuracy / case coverage) or preregister "
+            "the omission.\n")
 
     # ---------------- json + forest (default family only) ----------------
     out = {"schema_version": args.schema, "bootstrap_B": args.b, "necessity_null": args.null,

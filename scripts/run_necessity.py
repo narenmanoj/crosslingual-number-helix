@@ -77,6 +77,8 @@ def parse_args():
     # DISJOINT value sets (audit r5 #2): Q fitted on 10..99, causal test on 0..max_sum.
     p.add_argument("--fit-min", type=int, default=10, help="10 => helix fit disjoint from the 0..9 causal values")
     p.add_argument("--fit-max", type=int, default=99)
+    p.add_argument("--interchange", action="store_true", default=False,
+                   help="ALSO compute the exploratory delta interchange (off by default; audit r9 #10)")
     p.add_argument("--on-baseline-fallback", default="skip", choices=["skip", "error", "label"],
                    help="what to do when a cross-fit baseline bucket has no out-of-source examples "
                         "(audit r5 #7): skip the case (default), fail, or use it with an explicit label")
@@ -179,15 +181,16 @@ def main():
     # now transports a matched-arithmetic value displacement h_en(a',b)-h_en(a,b), NOT an absolute
     # carrier activation en_real[ap] (which also imported carrier/context/offset).
     en_arith = {}
-    for (v, b) in {(a, b) for (a, ap, b) in ic_cases} | {(ap, b) for (a, ap, b) in ic_cases}:
-        vs = str(v)
-        ep = f"{vs} + {b} = "
-        try:
-            epos = _number_token_indices(tok, ep, vs)[-1]
-        except ValueError:
-            continue
-        _, eh, _ = forward(model, tok, device, ep, layer=args.layer, want_hidden=True)
-        en_arith[(v, b)] = eh[epos]
+    if args.interchange:      # only pay for this cache when interchange is actually requested (r9 #10)
+        for (v, b) in {(a, b) for (a, ap, b) in ic_cases} | {(ap, b) for (a, ap, b) in ic_cases}:
+            vs = str(v)
+            ep = f"{vs} + {b} = "
+            try:
+                epos = _number_token_indices(tok, ep, vs)[-1]
+            except ValueError:
+                continue
+            _, eh, _ = forward(model, tok, device, ep, layer=args.layer, want_hidden=True)
+            en_arith[(v, b)] = eh[epos]
 
     ablation, interchange = {}, {}
     for form in args.forms:
@@ -345,10 +348,14 @@ def main():
                          "controls_by_seed": ctrl_case_by_seed, "keys": ab_keys},
         }
 
-        # ---------- (B) MATCHED-ARITHMETIC DELTA INTERCHANGE (audit r3 #2) ----------
-        # Sufficiency via the REAL en_digit arithmetic displacement h_en(a',b)-h_en(a,b) added at the
-        # source token (NOT an absolute carrier activation en_real[a'], which also imported carrier /
-        # context / surface-form offset). Control = norm-matched random delta, averaged over ALL seeds.
+        # ---------- (B) MATCHED-ARITHMETIC DELTA INTERCHANGE (audit r3 #2; OPT-IN, r9 #10) ----------
+        # This is an EXPLORATORY, undercontrolled sufficiency check (Haar-only null, always last-token)
+        # that main delta transport already covers -- and it was being recomputed for every necessity
+        # position. It is off by default; --interchange re-enables it.
+        if not args.interchange:
+            interchange[form] = {"skipped": True, "reason": "opt_in_only (--interchange)"}
+            print(f"  done {form}")
+            continue
         sub_shift, matched_shift, ic_keys = [], [], []
         ic_ctrl_by_seed = []          # per-case list of per-seed control shifts (audit r4 #4)
         for (a, ap, b) in ic_cases:
@@ -381,7 +388,9 @@ def main():
             "subspace_shift": float(np.mean(sub_shift)) if sub_shift else float("nan"),
             "matched_random_shift": float(np.mean(matched_shift)) if matched_shift else float("nan"),
             "per_case": {"subspace": sub_shift, "matched_random": matched_shift, "keys": ic_keys},
-            "control_by_seed": ic_ctrl_by_seed, "control_seeds": list(range(args.n_seeds)),
+            # the ACTUAL random-subspace builder seeds (args.seed + i), not a bare 0..n-1 (audit r9 #9)
+            "control_by_seed": ic_ctrl_by_seed,
+            "control_builder_seeds": [args.seed + i for i in range(args.n_seeds)],
         }
         print(f"  done {form}")
 
@@ -403,13 +412,16 @@ def main():
         print(row)
     print("  (each null column = restricted-digit-choice acc after ablating that subspace, mean±std over seeds)")
     print("=" * 96)
-    print(f"\n(B) MATCHED-ARITHMETIC DELTA INTERCHANGE (inject @ source last token)  -- subspace_shift >> norm-matched control => real")
-    print("-" * 96)
-    print(f"  {'form':<20}{'axis':<9}{'subspace_shift':>16}{'matched_random':>16}")
-    for form in args.forms:
-        I = interchange[form]
-        print(f"  {form:<20}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
-    print("=" * 96 + "\n")
+    if not args.interchange:
+        print("\n(B) delta interchange SKIPPED (exploratory; enable with --interchange)\n")
+    else:
+        print(f"\n(B) MATCHED-ARITHMETIC DELTA INTERCHANGE (inject @ source last token)  -- subspace_shift >> norm-matched control => real")
+        print("-" * 96)
+        print(f"  {'form':<20}{'axis':<9}{'subspace_shift':>16}{'matched_random':>16}")
+        for form in args.forms:
+            I = interchange[form]
+            print(f"  {form:<20}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
+        print("=" * 96 + "\n")
 
     out = {**stamp(C.SCHEMA_VERSION, "necessity", estimand=E_ABLATION,
                    analysis_status=VALIDATED, allow_dirty=args.allow_dirty),
@@ -420,7 +432,12 @@ def main():
            "layer_selection": layer_prov,
            "ablation_position": args.intervention_pos, "interchange_position": "source_last_token",
            "interchange_estimand": "matched_arithmetic_delta",
-           "r": r, "n_seeds": args.n_seeds, "ablation_baseline": args.ablation_baseline,
+           "r": r, "n_seeds": args.n_seeds,
+           # the per-seed control arrays (controls_by_seed) are POSITIONAL; record the actual builder
+           # seeds so the null bank is exactly reproducible even when --seed != 0 (audit r9 #9).
+           "control_base_seed": args.seed,
+           "control_builder_seeds": [args.seed + i for i in range(args.n_seeds)],
+           "ablation_baseline": args.ablation_baseline,
            "baseline_fit_split": "in_run", "baseline_crossfit_group": args.baseline_crossfit,
            "baseline_policy": "in_run_leave_one_source_value_out" if args.baseline_crossfit == "source_value" else "in_run_pooled",
            "on_baseline_fallback": args.on_baseline_fallback,
