@@ -34,6 +34,7 @@ from src import data as D
 from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
                          continuation_answer_ids)
 from src.helix import fit_helix
+from src.provenance import stamp, EXPLORATORY, E_ABSOLUTE
 from src.patching import (
     helix_reconstruct, helix_subspace_basis, random_subspace_basis,
     make_patched_vector, patch_residual,
@@ -186,7 +187,7 @@ def main():
     png = os.path.join(args.out_dir, f"transport_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"schema_version": C.SCHEMA_VERSION, "stale": True, "stale_reason": "reconstructed targets; unmatched single random control; no per-case stats (audit r3 #5)",
+    out = {**stamp(C.SCHEMA_VERSION, "transport_sweep", estimand=E_ABSOLUTE, analysis_status=EXPLORATORY), "stale": True, "stale_reason": "reconstructed targets; unmatched single random control; no per-case stats (audit r3 #5)",
            "model_revision": model_revision(model, args.model), "model": args.model, "layers": sweep_layers, "r": r, "forms": args.forms,
            "curves": curves, "frac_subspace_over_full": frac,
            "fit_r2": {L: fitL[L]["r2"] for L in sweep_layers}}

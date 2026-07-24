@@ -30,6 +30,7 @@ from src.alignment import (
     subspace_alignment, linear_cka, random_subspace_floor, orthogonal_procrustes_cv,
     canonical_map_cosines, permutation_alignment_null,
 )
+from src.provenance import stamp, VALIDATED, E_GEOMETRY
 
 
 def parse_args():
@@ -165,7 +166,7 @@ def main():
 
     # --- save ---
     result = {
-        "schema_version": C.SCHEMA_VERSION,
+        **stamp(C.SCHEMA_VERSION, "align", estimand=E_GEOMETRY, analysis_status=VALIDATED),
         "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model,
         "r2": r2s, "r2_heldout": r2ho, "r2_shuffled": shuf, "random_subspace_floor": floor,

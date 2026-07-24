@@ -13,7 +13,7 @@ whether the model *relies* on the shared subspace, with the controls a skeptic d
       Intervention position is configurable (--intervention-pos): the number's last token, its whole
       span, or the token just after it (words span several tokens). Token count is recorded.
 
-  (B) MATCHED-SOURCE INTERCHANGE. Patch the model's real en_digit activation for a', subspace-only,
+  (B) MATCHED-ARITHMETIC DELTA INTERCHANGE. Add the real en_digit arithmetic displacement, subspace-only,
       vs a NORM-MATCHED random subspace (so "does it steer" isn't confounded by "it perturbs less").
 
 Readout = restricted digit-choice accuracy (argmax over the ten 0..9 answer tokens), single-digit
@@ -43,8 +43,9 @@ from src.helix import fit_helix
 from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
     make_patched_vector, norm_matched_ablation, subspace_delta, norm_match, subspace_energy,
-    patch_residual, patch_residual_multi, assert_hook_equivalence,
+    patch_residual, patch_residual_multi, assert_hook_equivalence, _proj,
 )
+from src.provenance import stamp, VALIDATED, E_ABLATION
 
 CONTROLS = ["random", "cov_matched", "shuf_fourier"]
 
@@ -58,6 +59,11 @@ def parse_args():
     p.add_argument("--ablation-baseline", default="form_arith", choices=["form_arith", "carrier"],
                    help="mean-ablation target: 'form_arith' = this form's OWN arithmetic-context mean "
                         "(context-matched, audit #12); 'carrier' = the en_digit fit mean (legacy)")
+    p.add_argument("--baseline-crossfit", default="source_value", choices=["source_value", "none"],
+                   help="cross-fit the ablation baseline so a case never contributes to its own target "
+                        "(audit r4 #8): 'source_value' = leave-one-source-value-out")
+    p.add_argument("--allow-dirty", action="store_true", default=True)
+    p.add_argument("--no-allow-dirty", dest="allow_dirty", action="store_false")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9)
     p.add_argument("--pairs-per-form", type=int, default=40)
@@ -163,9 +169,10 @@ def main():
         # arithmetic-context mean, CONDITIONED on (token_count, relative token position) so a span
         # token is ablated toward the mean at its own position/length, not a form-wide pooled mean.
         # Falls back to the global fit mean for any (tc, rel) bucket with no data.
-        pos_means = {}
+        # Buckets keep the CONTRIBUTING SOURCE VALUE with each vector so the baseline can be cross-fit
+        # (leave-one-source-value-out), i.e. a case never helps estimate its own intervention target.
+        buckets = {}
         if args.ablation_baseline == "form_arith":
-            buckets = {}
             for (a, b) in ab_cases:
                 a_str = D.FORMS[form].render(a)
                 prompt = f"{a_str} + {b} = "
@@ -175,11 +182,20 @@ def main():
                     continue
                 _, hid, sl = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
                 for p in intervention_positions(idxs, args.intervention_pos, sl):
-                    buckets.setdefault((len(idxs), p - idxs[0]), []).append(hid[p])
-            pos_means = {k: np.mean(v, axis=0) for k, v in buckets.items()}
+                    buckets.setdefault((len(idxs), p - idxs[0]), []).append((a, hid[p]))
 
-        def baseline_at(idxs, p):
-            return pos_means.get((len(idxs), p - idxs[0]), mean_vec) if args.ablation_baseline == "form_arith" else mean_vec
+        def baseline_at(idxs, p, src):
+            """Per-(token-count, relative-position) mean, EXCLUDING cases whose source value == src."""
+            if args.ablation_baseline != "form_arith":
+                return mean_vec
+            entries = buckets.get((len(idxs), p - idxs[0]))
+            if not entries:
+                return mean_vec
+            if args.baseline_crossfit == "source_value":
+                held = [v for (s, v) in entries if s != src]
+                if held:
+                    return np.mean(held, axis=0)
+            return np.mean([v for (_, v) in entries], axis=0)
 
         clean_ok, helix_ok = 0, 0
         ctrl_ok = {c: np.zeros(args.n_seeds) for c in CONTROLS}
@@ -187,6 +203,7 @@ def main():
         clean_case, helix_case, ab_keys = [], [], []
         ctrl_case = {c: [] for c in CONTROLS}                              # per-case MEAN over seeds
         ctrl_case_by_seed = {c: [] for c in CONTROLS}                     # per-case list of per-seed 0/1 (audit r3 #3)
+        ctrl_alpha = {c: [] for c in CONTROLS}                            # norm-match scale factors (audit r4 #7)
         tok_counts, n = [], 0
         for (a, b) in ab_cases:
             a_str = D.FORMS[form].render(a)
@@ -197,7 +214,7 @@ def main():
                 continue
             Lc, hidden, seq_len = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
             positions = intervention_positions(idxs, args.intervention_pos, seq_len)
-            base = {p: baseline_at(idxs, p) for p in positions}           # per-position baseline
+            base = {p: baseline_at(idxs, p, a) for p in positions}        # cross-fit per-position baseline
             n += 1
             tok_counts.append(len(idxs)); ab_keys.append((a, b))
             cc = int(argmax_ans(Lc) == a + b); clean_ok += cc; clean_case.append(cc)
@@ -214,6 +231,12 @@ def main():
                     p2v = {p: norm_matched_ablation(hidden[p], base[p], Q_signal=Q, Q_control=Qc) for p in positions}
                     sc = int(argmax_ans(patched_logits(model, tok, device, prompt, hook_layer, p2v)) == a + b)
                     ctrl_ok[c][si] += sc; seed_correct.append(sc)
+                    # scale factor alpha: a very large alpha means the control barely overlaps (h-mu),
+                    # so the "matched" ablation is an extrapolation off-manifold (audit r4 #7)
+                    for p in positions:
+                        nrc = float(np.linalg.norm(_proj(Qc, hidden[p] - base[p])))
+                        nrs = float(np.linalg.norm(_proj(Q, hidden[p] - base[p])))
+                        ctrl_alpha[c].append(nrs / nrc if nrc > 1e-8 else float("nan"))
                 ctrl_case[c].append(float(np.mean(seed_correct)))
                 ctrl_case_by_seed[c].append([int(s) for s in seed_correct])
                 # after norm-matching, per-seed removed energy ~ helix energy by construction (report helix's)
@@ -230,6 +253,11 @@ def main():
                          for c in CONTROLS},
             "removed_energy": {k: float(np.mean(v)) for k, v in energy.items()},
             "controls_norm_matched": True,
+            "control_alpha": {c: {"median": float(np.nanmedian(ctrl_alpha[c])) if ctrl_alpha[c] else float("nan"),
+                                  "frac_out_of_range": float(np.mean([(x < 0.25) or (x > 4.0)
+                                                                      for x in ctrl_alpha[c] if np.isfinite(x)]))
+                                  if ctrl_alpha[c] else float("nan")}
+                              for c in CONTROLS},
             # per-case arrays for bootstrap CIs + paired tests + full per-seed fidelity + case keys
             "per_case": {"clean": clean_case, "helix": helix_case, "controls": ctrl_case,
                          "controls_by_seed": ctrl_case_by_seed, "keys": ab_keys},
@@ -240,6 +268,7 @@ def main():
         # source token (NOT an absolute carrier activation en_real[a'], which also imported carrier /
         # context / surface-form offset). Control = norm-matched random delta, averaged over ALL seeds.
         sub_shift, matched_shift, ic_keys = [], [], []
+        ic_ctrl_by_seed = []          # per-case list of per-seed control shifts (audit r4 #4)
         for (a, ap, b) in ic_cases:
             if (a, b) not in en_arith or (ap, b) not in en_arith:
                 continue
@@ -262,12 +291,15 @@ def main():
                 Lm = patched_logits(model, tok, device, prompt, hook_layer, {pos: h_orig + dc})
                 seed_sh.append(float((Lm[ans_ids[ap + b]] - Lm[ans_ids[a + b]]) - base))
             matched_shift.append(float(np.mean(seed_sh)))
+            ic_ctrl_by_seed.append([float(s) for s in seed_sh])
             ic_keys.append((a, ap, b))
         interchange[form] = {
             "axis": D.FORMS[form].axis, "n": len(sub_shift), "estimand": "matched_arithmetic_delta",
+            "intervention_position": "source_last_token",     # NOT the ablation position (audit r4 #9)
             "subspace_shift": float(np.mean(sub_shift)) if sub_shift else float("nan"),
             "matched_random_shift": float(np.mean(matched_shift)) if matched_shift else float("nan"),
             "per_case": {"subspace": sub_shift, "matched_random": matched_shift, "keys": ic_keys},
+            "control_by_seed": ic_ctrl_by_seed, "control_seeds": list(range(args.n_seeds)),
         }
         print(f"  done {form}")
 
@@ -289,7 +321,7 @@ def main():
         print(row)
     print("  (each null column = restricted-digit-choice acc after ablating that subspace, mean±std over seeds)")
     print("=" * 96)
-    print(f"\n(B) MATCHED-SOURCE INTERCHANGE  -- subspace_shift >> norm-matched-random_shift => real, not energy artifact")
+    print(f"\n(B) MATCHED-ARITHMETIC DELTA INTERCHANGE (inject @ source last token)  -- subspace_shift >> norm-matched control => real")
     print("-" * 96)
     print(f"  {'form':<20}{'axis':<9}{'subspace_shift':>16}{'matched_random':>16}")
     for form in args.forms:
@@ -297,10 +329,16 @@ def main():
         print(f"  {form:<20}{I['axis']:<9}{I['subspace_shift']:>16.3f}{I['matched_random_shift']:>16.3f}")
     print("=" * 96 + "\n")
 
-    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
-           "layer": args.layer, "intervention_pos": args.intervention_pos, "r": r, "n_seeds": args.n_seeds,
-           "ablation_baseline": args.ablation_baseline, "controls_norm_matched": True,
-           "interchange_estimand": "matched_arithmetic_delta", "hook_rel_error": hook_err,
+    out = {**stamp(C.SCHEMA_VERSION, "necessity", estimand=E_ABLATION,
+                   analysis_status=VALIDATED, allow_dirty=args.allow_dirty),
+           "model_revision": model_revision(model, args.model), "layer": args.layer,
+           # positions are recorded SEPARATELY: the ablation honors --intervention-pos, the delta
+           # interchange always injects at the source's last token (audit r4 #9)
+           "ablation_position": args.intervention_pos, "interchange_position": "source_last_token",
+           "interchange_estimand": "matched_arithmetic_delta",
+           "r": r, "n_seeds": args.n_seeds, "ablation_baseline": args.ablation_baseline,
+           "baseline_fit_split": "in_run", "baseline_crossfit_group": args.baseline_crossfit,
+           "controls_norm_matched": True, "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}
     tag = args.model.split("/")[-1]

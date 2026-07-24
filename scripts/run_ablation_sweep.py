@@ -47,6 +47,7 @@ from src.patching import (
     helix_subspace_basis, random_subspace_basis, covariance_matched_basis, shuffled_fourier_basis,
     make_patched_vector, norm_matched_ablation, patch_residual, subspace_energy, assert_hook_equivalence,
 )
+from src.provenance import stamp, EXPLORATORY, E_LAYER_VULN
 
 STRUCT_NULLS = ["cov_matched", "shuf_fourier"]  # structured nulls evaluated at the necessity peak
 
@@ -256,10 +257,13 @@ def main():
     png = os.path.join(args.out_dir, f"ablation_sweep_{tag}.png")
     fig.savefig(png, dpi=130)
 
-    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
+    # EXPLORATORY: confounded by propagation depth, layer-dependent removed energy + fitted rank, and
+    # a last-token-only intervention. Excluded from the default statistical family (audit r4 #3).
+    out = {**stamp(C.SCHEMA_VERSION, "ablation_sweep", estimand=E_LAYER_VULN, analysis_status=EXPLORATORY),
+           "model_revision": model_revision(model, args.model),
            "layers": sweep_layers, "r": r, "forms": args.forms, "n_seeds": args.n_seeds,
            "null_seeds": args.null_seeds, "structured_nulls": args.structured_nulls,
-           "structured_nulls_norm_matched": True,
+           "structured_nulls_norm_matched": True, "intervention_position": "source_last_token",
            "hook_rel_error": hook_err, "ablation_baseline": "carrier_fit_mean",
            "readout": "restricted_digit_choice_accuracy", "curves": curves, "necessity_delta": delta}
     js = os.path.join(args.out_dir, f"ablation_sweep_{tag}.json")

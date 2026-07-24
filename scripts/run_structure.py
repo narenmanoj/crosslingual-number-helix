@@ -36,6 +36,7 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
                          continuation_answer_ids)
 from src.helix import fit_helix
 from src.alignment import subspace_alignment, random_subspace_floor, subspace_overlap
+from src.provenance import stamp, VALIDATED, E_GEOMETRY
 
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
 
@@ -235,7 +236,8 @@ def main():
     sc = os.path.join(args.out_dir, f"geombehav_{tag}_L{layer}.png")
     fig2.savefig(sc, dpi=130)
 
-    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
+    out = {**stamp(C.SCHEMA_VERSION, "structure", estimand=E_GEOMETRY, analysis_status=VALIDATED),
+           "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(), "form_ranks": form_ranks,
            # audit #8: this file is the AUTHORITATIVE H2 source. Its clean_contrasts use the correct
            # reference per axis; the everything-vs-en_digit axis_summary in align_*.json is confounded.

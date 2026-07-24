@@ -37,18 +37,27 @@ from src.extract import (load_model, extract_form_activations, _number_token_ind
                          continuation_answer_ids)
 from src.helix import fit_helix
 from src.patching import (
-    helix_reconstruct, helix_subspace_basis, random_subspace_basis,
-    make_patched_vector, patch_residual, assert_hook_equivalence, subspace_delta, norm_match,
+    helix_reconstruct, helix_subspace_basis, random_subspace_basis, top_pca_span_basis,
+    shuffled_fourier_basis, make_patched_vector, patch_residual, assert_hook_equivalence,
+    subspace_delta, norm_match,
 )
+from src.provenance import stamp, VALIDATED, LEGACY, E_DELTA, E_ABSOLUTE
 
+# LEGACY absolute-target modes (estimand = absolute_carrier_reconstruction). These replace the
+# subspace component with a reconstruction fitted on a *carrier* prompt, so they move value TOGETHER
+# WITH prompt context / form offset / token position. Kept only as an opt-in diagnostic (audit r4 #2);
+# they are NOT the default and must never share the "sufficiency" heading with the delta estimand.
 MODES = ["full", "subspace", "random"]
-# Delta transport (audit #2): instead of REPLACING the subspace component with a reconstruction
-# (which also imports form/carrier/context offset), ADD only the matched-arithmetic value DISPLACEMENT
+# Structured control families for the DELTA estimand (audit r4 #5). Norm matching equalizes magnitude
+# but not manifold plausibility, so we also project the SAME displacement into a top-PCA-span subspace
+# and a shuffled-Fourier subspace (fit through the whole pipeline on permuted labels).
+DELTA_FAMILIES = ["haar", "pca_span", "shuf_fourier"]
+# Delta transport (the PRIMARY estimand): instead of REPLACING the subspace component with a
+# reconstruction (which also imports form/carrier/context offset), ADD only the matched-arithmetic
+# value DISPLACEMENT
 #   h_B(a,b)  ->  h_B(a,b) + QQ^T ( h_en(a',b) - h_en(a,b) )
 # from two English-DIGIT arithmetic prompts at the same position. This holds addend, syntax, output
-# format, and form/context offset fixed and transports only the a->a' change. delta_rand = same with
-# a random subspace (control). This is the decisive value-transport test.
-DELTA_MODES = ["delta", "delta_rand"]
+# format, and form/context offset fixed and transports only the a->a' change.
 
 
 def parse_args():
@@ -63,9 +72,16 @@ def parse_args():
     p.add_argument("--fit-max", type=int, default=99, help="fit the en_digit helix on 0..fit_max")
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--delta", dest="delta", action="store_true", default=True,
-                   help="also run matched-arithmetic DELTA transport (audit #2; the decisive value test)")
+                   help="matched-arithmetic DELTA transport -- the DEFAULT/primary estimand")
     p.add_argument("--no-delta", dest="delta", action="store_false")
-    p.add_argument("--delta-ctrl-seeds", type=int, default=10, help="norm-matched random controls per delta case (audit #3)")
+    p.add_argument("--delta-ctrl-seeds", type=int, default=5,
+                   help="seeds PER control family (haar/pca_span/shuf_fourier), all norm-matched + retained")
+    p.add_argument("--include-legacy-absolute-patching", dest="legacy_absolute", action="store_true",
+                   default=False, help="ALSO run the legacy absolute-target modes (full/subspace/random) "
+                                       "as a labelled legacy_diagnostic -- off by default (audit r4 #2)")
+    p.add_argument("--allow-dirty", action="store_true", default=True,
+                   help="allow writing results from a dirty/unknown worktree (set false for production)")
+    p.add_argument("--no-allow-dirty", dest="allow_dirty", action="store_false")
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
     p.add_argument("--seed", type=int, default=0)
@@ -105,11 +121,19 @@ def main():
     fit = fit_helix(acts[args.layer], fit_numbers, k_pca=args.k_pca)
     print(f"en_digit helix fit at layer {args.layer}: R^2={fit['r2']:.3f}")
 
+    HL = acts[args.layer]
     Q = helix_subspace_basis(fit)                          # [d_model, r]
     r = Q.shape[1]
     Q_rand = random_subspace_basis(r, d_model, seed=args.seed)
-    Q_rand_bank = [random_subspace_basis(r, d_model, seed=args.seed + 1 + i) for i in range(args.delta_ctrl_seeds)]
-    recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a'
+    ctrl_seeds = list(range(args.delta_ctrl_seeds))
+    # three control FAMILIES for the delta estimand, every seed retained (audit r4 #4/#5)
+    ctrl_banks = {
+        "haar": [random_subspace_basis(r, d_model, seed=args.seed + 1 + i) for i in ctrl_seeds],
+        "pca_span": [top_pca_span_basis(HL, r, seed=args.seed + 1 + i) for i in ctrl_seeds],
+        "shuf_fourier": [shuffled_fourier_basis(HL, fit_numbers, k_pca=args.k_pca, seed=args.seed + 1 + i)
+                         for i in ctrl_seeds],
+    }
+    recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a' (legacy modes)
     ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
 
     def argmax_answer(logits):
@@ -129,7 +153,10 @@ def main():
     cases = cases[: args.pairs_per_form]
 
     # --- delta transport cache: en_digit ARITHMETIC activation h_en(v,b) for every (v,b) we need ---
-    all_modes = MODES + (DELTA_MODES if args.delta else [])
+    FAM2MODE = {"haar": "delta_rand", "pca_span": "delta_pca_span", "shuf_fourier": "delta_shuf_fourier"}
+    delta_modes = (["delta"] + [FAM2MODE[f] for f in DELTA_FAMILIES]) if args.delta else []
+    legacy_modes = MODES if args.legacy_absolute else []
+    all_modes = legacy_modes + delta_modes
     en_arith = {}
     if args.delta:
         for (v, b) in {(a, b) for (a, ap, b) in cases} | {(ap, b) for (a, ap, b) in cases}:
@@ -146,6 +173,8 @@ def main():
     results = {}
     for form in args.forms:
         per_mode = {m: {"shift": [], "flip": [], "n": 0} for m in all_modes}
+        ctrl_by_seed = {f: [] for f in DELTA_FAMILIES}   # per-case list of per-seed shifts (audit r4 #4)
+        alphas = {f: [] for f in DELTA_FAMILIES}         # norm-match scale factors (audit r4 #7)
         case_keys, delta_keys = [], []     # audit #12: (a, a', b) per case, aligned to the per-case arrays
         clean_correct = 0
         n_proc = 0  # cases that survived token-span identification (the honest denominator)
@@ -164,7 +193,7 @@ def main():
             h_orig = hidden[pos]                              # [d_model]
             target_vec = recon[ap]                            # en_digit helix vector for a'
 
-            for mode in MODES:
+            for mode in legacy_modes:   # LEGACY absolute-target diagnostic (opt-in, audit r4 #2)
                 Qm = Q if mode == "subspace" else (Q_rand if mode == "random" else None)
                 new_h = make_patched_vector(h_orig, target_vec, Q=Qm, mode=mode)
                 handle = patch_residual(model, hook_layer, pos,
@@ -202,12 +231,19 @@ def main():
 
                 sh, fl = shift_of(h_orig + dvec_h)
                 per_mode["delta"]["shift"].append(sh); per_mode["delta"]["flip"].append(fl); per_mode["delta"]["n"] += 1
-                ctrl_sh = []
-                for Qc in Q_rand_bank:
-                    dc = norm_match(subspace_delta(diff, Qc), nh)  # NORM-MATCH to the helix delta
-                    ctrl_sh.append(shift_of(h_orig + dc)[0])
-                per_mode["delta_rand"]["shift"].append(float(np.mean(ctrl_sh)))
-                per_mode["delta_rand"]["flip"].append(0); per_mode["delta_rand"]["n"] += 1
+                for fam in DELTA_FAMILIES:
+                    seed_sh, seed_fl = [], []
+                    for Qc in ctrl_banks[fam]:
+                        raw = subspace_delta(diff, Qc)
+                        nraw = float(np.linalg.norm(raw))
+                        alphas[fam].append(nh / nraw if nraw > 1e-8 else float("nan"))
+                        s, f = shift_of(h_orig + norm_match(raw, nh))   # NORM-MATCH to the helix delta
+                        seed_sh.append(s); seed_fl.append(f)
+                    m = FAM2MODE[fam]
+                    per_mode[m]["shift"].append(float(np.mean(seed_sh)))
+                    per_mode[m]["flip"].append(float(np.mean(seed_fl)))   # MEASURED, not hard-coded (audit r4 #6)
+                    per_mode[m]["n"] += 1
+                    ctrl_by_seed[fam].append([float(s) for s in seed_sh])
                 delta_keys.append((a, ap, b))
 
         n = max(n_proc, 1)
@@ -224,29 +260,54 @@ def main():
             "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in all_modes},
             # per-case (a, a', b) keys for exact pairing + clustered inference (audit #11/#12)
             "per_case_keys": {"modes": case_keys, "delta": delta_keys},
+            # full case x seed control matrices -- never only the mean (audit r4 #4)
+            "delta_control_by_seed": ctrl_by_seed,
+            "control_seeds": ctrl_seeds,
+            # norm-match scale diagnostics: a huge alpha means the control captured almost none of the
+            # displacement, so the "matched" intervention is an extrapolation off-manifold (audit r4 #7)
+            "delta_alpha": {f: {"median": float(np.nanmedian(alphas[f])) if alphas[f] else float("nan"),
+                                "frac_out_of_range": float(np.mean([(x < 0.25) or (x > 4.0)
+                                                                    for x in alphas[f] if np.isfinite(x)]))
+                                if alphas[f] else float("nan")}
+                             for f in DELTA_FAMILIES},
         }
 
     # --- report (long format: one row per form x mode) ---
     print("\n" + "=" * 82)
     print(f"CAUSAL TRANSPORT  (en_digit helix @ L{args.layer}, r={r})")
-    print("  primary = mean_shift (logits toward a'+b) & pos_rate; random mode is the illusion control")
-    print("-" * 82)
-    print("  delta/delta_rand = matched-arithmetic value transport (audit #2): delta >> delta_rand => value is portable")
-    print(f"  {'source form':<20}{'axis':<9}{'mode':<10}{'clean_acc':>10}{'mean_shift':>12}{'pos_rate':>10}{'flip':>7}")
+    print(f"  PRIMARY estimand = {E_DELTA}: delta vs norm-matched controls in 3 families")
+    print("  (delta_rand=Haar, delta_pca_span=top-PCA-span, delta_shuf_fourier=shuffled-pipeline)")
+    if args.legacy_absolute:
+        print(f"  full/subspace/random = LEGACY {E_ABSOLUTE} (diagnostic only -- NOT a sufficiency claim)")
+    print("-" * 92)
+    print(f"  {'source form':<20}{'axis':<9}{'mode':<19}{'clean_acc':>10}{'mean_shift':>12}{'pos_rate':>10}{'flip':>7}")
     for form in args.forms:
         R = results[form]
         for m in all_modes:
             M = R["modes"][m]
-            print(f"  {form:<20}{R['axis']:<9}{m:<10}{R['clean_acc']:>10.2f}"
+            print(f"  {form:<20}{R['axis']:<9}{m:<19}{R['clean_acc']:>10.2f}"
                   f"{M['mean_shift']:>12.3f}{M['pos_shift_rate']:>10.2f}{M['flip_rate']:>7.2f}")
-    print("=" * 82)
-    print("Works iff: full/subspace mean_shift large & positive (pos_rate>>0.5), AND random")
-    print("mean_shift ~0 -- judge the random control by MAGNITUDE (>>10x smaller), not pos_rate:")
-    print("a random subspace leaks a tiny consistent nudge (~r/d_model), so its pos_rate is unreliable.")
+    print("=" * 92)
+    print("Works iff: delta mean_shift large & positive AND every norm-matched control family ~0.")
+    for form in args.forms:
+        al = results[form].get("delta_alpha", {})
+        bad = [f"{f}:{al[f]['frac_out_of_range']:.2f}" for f in al if np.isfinite(al[f]["frac_out_of_range"])
+               and al[f]["frac_out_of_range"] > 0.2]
+        if bad:
+            print(f"  WARN {form}: control norm-match scale alpha outside [0.25,4] for {', '.join(bad)} "
+                  "-> those 'matched' controls are extrapolations, read them with care.")
     print("en_digit (within-form) should be strongest. flip is a strict lower bound (helix R^2~0.5 =>")
     print("partial reconstruction -> shift moves the answer without always flipping the argmax).\n")
 
-    out = {"schema_version": C.SCHEMA_VERSION, "model_revision": model_revision(model, args.model),
+    out = {**stamp(C.SCHEMA_VERSION, "transport",
+                   estimand=E_DELTA if args.delta else E_ABSOLUTE,
+                   analysis_status=VALIDATED if args.delta else LEGACY,
+                   allow_dirty=args.allow_dirty),
+           "legacy_absolute_included": args.legacy_absolute,
+           "legacy_absolute_estimand": E_ABSOLUTE if args.legacy_absolute else None,
+           "intervention_position": "source_last_token",
+           "delta_control_families": DELTA_FAMILIES,
+           "model_revision": model_revision(model, args.model),
            "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
            "delta_ctrl_seeds": args.delta_ctrl_seeds, "results": results}

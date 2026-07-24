@@ -194,7 +194,8 @@ src/data.py                   # renders numbers across the two axes (script vs l
 src/extract.py                # loads a model, pulls the residual-stream vector at the number token
 src/helix.py                  # fits the helix (PCA + Fourier), R^2, shuffled-label control
 src/alignment.py              # subspace principal angles + Procrustes-CV + CKA + random floor
-src/patching.py               # STEP-3 machinery: helix reconstruct/subspace + full/subspace/random patch
+src/patching.py               # STEP-3 machinery: subspace/delta patches, norm-matched controls, hook checks
+src/provenance.py             # schema/estimand/status stamping + FAIL-FAST admission gate for analyses
 scripts/run_fit_and_align.py  # steps 1+2: fit + cross-form alignment, single layer
 scripts/run_layer_sweep.py    # fit+align at EVERY layer -> subspace_cos-vs-layer plot per axis
 scripts/run_transport.py      # STEP 3 sufficiency: causal cross-form transport + full/subspace/random controls
@@ -203,7 +204,7 @@ scripts/run_ablation_sweep.py    # necessity vs layer: helix-vs-random Δ per la
 scripts/run_transport_sweep.py   # transport at every layer (layer-normalized subspace/full)
 scripts/run_structure.py      # #6 pairwise form x form matrix + #7 geometry<->behavior (one model load)
 scripts/aggregate_runs.py     # collect experiments/align_*.json -> cross-model table + bar chart
-scripts/analyze_stats.py      # bootstrap 95% CIs + paired significance tests over the per-case logs (no model load)
+scripts/analyze_stats.py      # fail-fast, estimand-aware stats: clustered CIs + cluster permutation + BH-FDR (no model load)
 scripts/run_overnight.sh      # unattended full-model loop -> per-case logs -> analyze_stats (per-model cache cleanup)
 scripts/inspect_tokenization.py  # diagnostic: token counts + what each pooling reads per form
 ```
@@ -266,15 +267,27 @@ OUT_DIR=exp_night1 MODELS="Qwen/Qwen2.5-7B ibm-granite/granite-4.0-h-tiny-base" 
 python scripts/analyze_stats.py --out-dir experiments --b 20000
 ```
 
-`analyze_stats.py` prints a per-(model, form) table — effect, **95% CI**, one-sided *p*, and a
-`***`/`n.s.` flag (significant ⇔ CI excludes 0) — plus a significance summary and a **forest plot**
-(`stats_forest.png`, colored by axis). It covers four claims: **sufficiency** (subspace−random
-shift), **matched-source interchange** (subspace−norm-matched-random), **necessity** (structured-null−helix
-accuracy drop at the sharing layer; `--null shuf_fourier|cov_matched|random`), and **necessity_peak**
-— the same structured-null test but at the *necessity peak* depth, ingested from
-`run_ablation_sweep`'s held-out structured-null pass. Empty panels (e.g. `necessity_peak` on older
-JSONs) are dropped automatically. The sweep also prints Δ-vs-random and Δ-vs-shuffled-Fourier side by
-side in its own peak table.
+`analyze_stats.py` is **fail-fast and estimand-aware**: it refuses any result file that doesn't
+declare the expected `schema_version` / `experiment_type` / `estimand` / `analysis_status`, so a
+stale pre-overhaul JSON sitting in `experiments/` can never slip into a summary.
+
+**Default (validated) claim family** — all clustered by source value:
+`delta_transport` (matched-arithmetic delta − norm-matched Haar), `delta_vs_pca_span`,
+`delta_vs_shuf_fourier`, `interchange`, `necessity`.
+
+**Opt-in only**, excluded from the default FDR family, headline counts and figures:
+
+```bash
+--include-legacy-absolute-patching   # adds `sufficiency` (legacy absolute carrier reconstruction)
+--include-exploratory-sweeps         # adds `necessity_peak` (confounded layer-sweep vulnerability)
+--no-strict                          # skip inadmissible files with a warning instead of failing
+```
+
+Inference is consistent end-to-end: paired differences are matched **strictly by case key** (never by
+position), CIs are **cluster bootstraps** over source value, the permutation test flips signs at the
+**cluster level** (so p and CI assume the same independent unit), and BH-FDR is applied to that
+clustered p. Where per-seed control matrices exist it also reports **P(signal beats a random control
+draw)**, comparisons against the *strongest* control, and a **hierarchical CI** over cases × seeds.
 
 ### The three metrics (validated on synthetic ground-truth cases)
 - **`subspace_cos`** — principal-angle cosine between the two helix subspaces. **The primary,
@@ -324,7 +337,7 @@ BH-FDR** (`analyze_stats.py`).
 | **H1/H2** graded geometry | `language` consistently least-shared; script/notation high (order varies) | ✅ all models (validated) |
 | **exposure-dependent** script sharing | cross-script sharing 0.51→0.83, tracks (multi)script training | ✅ (Aya a caveat) |
 | **replication across families** | helix + transport in **3 Mamba/hybrid** families (not "architecture-independent") | ✅ Granite-4, Falcon-H1, Nemotron |
-| **mechanistic** localization | sharing peaks in a band, then collapses; peak layer family-specific | ✅ all |
+| **mechanistic** localization | sharing peaks in a band, then collapses; peak layer family-specific | ◐ **exploratory** (stale sweep; locates the band only) |
 | **H3** causal *sufficiency* | subspace patch steers all forms, **norm-matched** random does not | ✅ sign robust; **counts pending rerun** (was 45/45) |
 | **H3** delta interchange | real matched-arithmetic Δ steers ≫ norm-matched random | ◐ new estimand, **pending rerun** |
 | **H3** causal *necessity* | norm-matched ablation drops accuracy helix-specifically | ◐ **script-biased**; strong vs random null, weaker vs structured; **pending rerun** |
@@ -376,15 +389,21 @@ notation: en_digit↔en_word; language: **en_word↔foreign words**, not en_digi
   hypothesis, not a law. And `script` vs `notation` order is **model-dependent** (Qwen3
   script>notation; OLMo/Granite notation>script), so we do *not* claim `script ≈ notation`.
 
-**Architecture-independence.** Granite-4 is a **hybrid Mamba-2/MoE**, not a transformer, yet shows
-the helix, the same graded sharing, causal transport, and (its cleanest-yet) cross-script necessity —
-evidence the number geometry is not a transformer artifact.
+**Replication across transformer and hybrid families.** Granite-4 is a **hybrid Mamba-2/MoE**, not a
+transformer, yet shows the helix, the same graded sharing, and causal transport — evidence the number
+geometry is not a transformer-only artifact. (Not "architecture-independent": 9 checkpoints across 7
+orgs are not 9 independent architecture samples.)
 
-### Mechanistic: sharing is localized, but the band is family-specific
-The layer sweep (`run_layer_sweep.py`) shows cross-form `subspace_cos` rise, plateau, then
-collapse in the final layers — *consistent with* later form-specific specialization (though the
-sweep doesn't identify the cause of the decline; it could also reflect helix-fit-quality or
-anisotropy changes). H2 holds at *every* layer. **Where it peaks moves with the model:**
+### Mechanistic: sharing is localized, but the band is family-specific *(exploratory)*
+> ⚠ **Exploratory, not a validated claim.** This comes from `run_layer_sweep.py`, which is marked
+> STALE: it uses the en_digit reference (so its "language" curve mixes notation+language), in-sample
+> R², mean principal cosine only, and no pipeline-matched null. It is useful for *locating* the band
+> and nothing more. In particular, **we do not claim "H2 holds at every layer"** — that would require
+> the clean per-axis contrasts, which are only computed at the chosen layer (`run_structure.py`).
+
+The sweep shows cross-form `subspace_cos` rise, plateau, then collapse in the final layers —
+*consistent with* later form-specific specialization (the sweep doesn't identify the cause; it could
+also reflect helix-fit-quality or anisotropy changes). **Where it peaks moves with the model:**
 
 | model | sharing peak (max `subspace_cos`) | profile |
 |---|---|---|
@@ -399,11 +418,38 @@ So "shared **mid**-band" is *not* universal. What's universal: the ordering, sha
 floor, and the late-layer collapse. Localization becoming a finding in itself (multilingual-
 specialized Aya integrates number-form later) is an honest cross-architecture result.
 
-### H3 (sufficiency): cross-form causal transport works (single layer)
-`run_transport.py` patches a source number's residual (at the sharing-peak layer) with the
-`en_digit` helix's encoding of a *different* value, inside `"a + b = "`, and measures whether the
-answer moves toward the transported value. On Qwen2.5-7B @ L14 (overnight run, 120 cases/form),
-subspace `mean_shift` vs the random control:
+### H3 (sufficiency): matched-arithmetic delta transport
+The **primary sufficiency estimand** (`run_transport.py`, default) adds *only* the matched-arithmetic
+value displacement at the source token, inside `"a + b = "`:
+
+```
+h_B(a,b)  ->  h_B(a,b) + QQᵀ( h_en(a',b) − h_en(a,b) )
+```
+
+holding the addend, syntax, answer format, and form/carrier offset fixed — so what moves is the
+`a → a'` change and nothing else. Every control is **norm-matched to the helix displacement**, run
+over multiple seeds, and every seed is retained (so we can report *P(signal beats a random control
+draw)*, not just "beats the control mean").
+
+**Control inventory, by experiment** (they are *not* the same set — audit r4 README #3):
+
+| experiment | controls actually applied |
+|---|---|
+| **delta transport** (sufficiency) | norm-matched **Haar**, **top-PCA-span**, **shuffled-Fourier** — all seed-retained |
+| **delta interchange** | norm-matched **Haar**, all seeds retained |
+| **necessity ablation** | norm-matched **Haar**, **top-PCA-span**, **shuffled-Fourier**, per-seed retained |
+| *all three* | ☐ downstream-**sensitivity**-matched controls remain **open** |
+
+> Scope: this passes isotropic + norm-matched + structured-subspace controls. The residual Makelov
+> concern (a selected subspace acting through a parallel pathway) is addressed by the necessity
+> evidence rather than settled by sufficiency alone.
+
+<details>
+<summary><b>Historical pre-overhaul results — not valid for current claims</b> (click to expand)</summary>
+
+These are the **legacy absolute-patching** numbers (schema 1.x): the subspace component was replaced
+with a *carrier-prompt reconstruction*, which moves value together with prompt context, form offset
+and token position. They are retained only to show the shape of the earlier result. Qwen2.5-7B @ L14:
 
 | source form | subspace_shift | random_shift | ratio |
 |---|---|---|---|
@@ -413,21 +459,13 @@ subspace `mean_shift` vs the random control:
 | devanagari (cross-script) | +1.71 | +0.01 | ~170× |
 | arabic_indic (cross-script) | +2.52 | −0.01 | ~∞ |
 
-Patching the `en_digit` helix subspace steers arithmetic for numbers presented as Spanish/French
-words and Devanagari digits — **the shared subspace is sufficient to drive the answer regardless of
-surface form** — while an equal-dimension random subspace does essentially nothing. In the
-pre-overhaul 9-model run this held for **every** model×form cell; those exact counts (e.g. "45/45")
-and the magnitudes in the table above are **legacy (schema 1.x) and pending regeneration** under the
-corrected fit + delta estimand. The *sign* is robust and reproduces on a live model via delta
-transport, against a **norm-matched** random control (matched-arithmetic **delta interchange** in
-`run_necessity.py`, all seeds norm-matched) — so the effect is the *specific helix directions*, not
-just "a large enough perturbation." Effect *magnitudes* are not cross-model comparable (different
-readout scales); significance is the claim.
+The pre-overhaul 9-model run found this significant in **every** model×form cell ("45/45"). Those
+counts and magnitudes are **superseded**: they used the uncentered-basis fit, the absolute estimand,
+and un-normalized single-seed controls. `analyze_stats.py` now refuses these files unless you pass
+`--include-legacy-absolute-patching`, and reports them under `sufficiency` (never under the primary
+`delta_transport` heading).
 
-> Scope: this passes **isotropic**, **norm-matched**, and **matched-source** (real-activation
-> interchange) controls, and the necessity legs add covariance-matched + shuffled-Fourier structured
-> nulls. The residual Makelov concern (a selected subspace acting through a parallel pathway) is
-> addressed by the necessity evidence below rather than fully settled by sufficiency alone.
+</details>
 
 **Caveat — across-layer causal localization is deliberately *not* a headline.** Raw transport
 magnitude isn't comparable across layers (an earlier intervention propagates through more layers →
@@ -639,9 +677,36 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
 - ✅ **Test suite hardened (#9), 15→25 tests.** Fixed broadcast-noise helper; Procrustes now tests
   rotation recovery; added a true axis-relabeling test (span ~1 while coordinate cosines drop);
   norm-match/ablation tests call the **real** helpers; added clean-H2-aggregation + FDR-on-perm tests.
+**Round 4 (estimand-separation audit) — all code items addressed:**
+- ✅ **Schema is ENFORCED, not just stamped (#1).** New `src/provenance.py`: every writer `stamp()`s
+  `schema_version / experiment_type / estimand / analysis_status / code_commit / dirty_worktree`;
+  every reader calls `require_schema()` and **fails by default**.
+- ✅ **Legacy absolute patching is opt-in (#2).** Delta transport is the default estimand; `full/
+  subspace/random` run only under `--include-legacy-absolute-patching`, are labelled
+  `legacy_diagnostic` / `absolute_carrier_reconstruction`, and no longer share the sufficiency heading.
+- ✅ **Exploratory sweeps excluded from default stats (#3).** Sweeps stamp `exploratory` /
+  `heldout_layerwise_vulnerability`; admitted only via `--include-exploratory-sweeps` and kept out of
+  the FDR family, headline counts and figures.
+- ✅ **Control-seed uncertainty retained (#4).** Transport + interchange save full case × seed
+  matrices; the analysis reports P(beat a random control), strongest-control and worst-control
+  margins, and a **hierarchical bootstrap** over cases × seeds.
+- ✅ **Structured controls for delta sufficiency (#5)** — Haar + top-PCA-span + shuffled-Fourier, all
+  norm-matched; ✅ **`delta_rand.flip_rate` measured, not hard-coded 0 (#6)**.
+- ✅ **Norm-match scale α recorded (#7)** for transport and necessity, with the fraction outside
+  [0.25, 4] reported and warned on (flags off-manifold "matched" controls).
+- ✅ **Ablation baseline cross-fit (#8)** — leave-one-source-value-out, so no case estimates its own
+  intervention target (`baseline_crossfit_group`).
+- ✅ **Positions recorded separately (#9)** (`ablation_position` vs `interchange_position`); the
+  experiment is renamed **matched-arithmetic delta interchange** throughout.
+- ✅ **Strict pairing by case key (#10)** (`paired_by_key`: rejects duplicate keys, differing case
+  sets, and silently-reordered conditions); ✅ **cluster-level permutation p used for FDR (#11)**;
+  ✅ **git commit + dirty-worktree saved (#12)** with a production `--no-allow-dirty` gate.
+- ✅ **Tests 25 → 30**, covering schema rejection on each dimension, strict key pairing (including
+  reordering), cluster-vs-row permutation conservatism, and seed-level control statistics.
 - ☐ **Open (need new data / decisions):** carrier-language factorial (#16); post-span & joint-span
   interventions; preregistered causal-layer selection; continuation-likelihood / word-form readouts;
-  coordinate-level bootstrap CIs + no-rotation cross-prediction; downstream-sensitivity-matched controls.
+  coordinate-level bootstrap CIs + no-rotation cross-prediction; downstream-**sensitivity**-matched
+  controls (norm matching is not sensitivity matching).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,

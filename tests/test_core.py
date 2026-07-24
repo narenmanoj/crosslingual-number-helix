@@ -19,7 +19,10 @@ from src.patching import (helix_reconstruct, helix_subspace_basis, make_patched_
 from src.alignment import (subspace_alignment, orthogonal_procrustes_cv, canonical_map_cosines,
                            permutation_alignment_null, orthonormal_basis, subspace_overlap)
 from src.extract import validate_single_token_answers, continuation_answer_ids
-from analyze_stats import bh_fdr, perm_sign_p, paired, cluster_boot
+from src.provenance import (require_schema, admits, stamp, git_metadata,
+                            VALIDATED, LEGACY, EXPLORATORY, E_DELTA, E_ABSOLUTE)
+from analyze_stats import (bh_fdr, paired, paired_by_key, cluster_boot, cluster_sign_p,
+                           hier_boot, seed_stats)
 
 RNG = np.random.default_rng(0)
 NUMS = list(range(100))
@@ -174,11 +177,23 @@ def test_bh_fdr_known_pvalues():
     assert list(rj) == [True, True, True]
 
 
-def test_perm_p_symmetric_null():
+def test_cluster_sign_p_null_and_signal():
     rng = np.random.default_rng(0)
-    # zero-centered symmetric diffs => large permutation p; strongly positive => tiny p
-    assert perm_sign_p(rng.standard_normal(200) * 0.5, B=2000) > 0.2
-    assert perm_sign_p(np.ones(50) * 0.5 + rng.standard_normal(50) * 0.05, B=2000) < 0.01
+    g = np.repeat(np.arange(20), 5)
+    # zero-centered symmetric diffs => large p; strongly positive => small p
+    assert cluster_sign_p(rng.standard_normal(100) * 0.5, g, B=2000) > 0.2
+    assert cluster_sign_p(np.ones(100) * 0.5 + rng.standard_normal(100) * 0.05, g, B=2000) < 0.05
+
+
+def test_cluster_sign_p_is_more_conservative_than_row_level():
+    # audit r4 #11: with strong within-cluster correlation, flipping per cluster must NOT be more
+    # significant than flipping per row (the row-level test overstates evidence).
+    rng = np.random.default_rng(1)
+    g = np.repeat(np.arange(6), 10)                       # 6 clusters x 10 identical-ish rows
+    diff = np.repeat(rng.standard_normal(6) + 0.4, 10) + rng.standard_normal(60) * 1e-3
+    p_cluster = cluster_sign_p(diff, g, B=4000)
+    p_row = cluster_sign_p(diff, None, B=4000)            # groups=None => per-row flips
+    assert p_cluster >= p_row, f"cluster p ({p_cluster}) must be >= row p ({p_row})"
 
 
 def test_paired_asserts_equal_length():
@@ -250,6 +265,72 @@ def test_axis_relabeling_span_vs_coordinates():
     assert subspace_alignment(D_A, D_B)["mean_cos"] > 0.999, "span (row space) is unchanged by R"
     coord = canonical_map_cosines({"helix_dirs_model": D_A}, {"helix_dirs_model": D_B})
     assert coord["mean_abs_cos"] < 0.9, "coordinate identity must DROP under axis relabeling"
+
+
+# ---- audit round 4: schema enforcement, strict pairing, seed-level control stats ----
+def _hdr(**kw):
+    base = {"schema_version": "2.2", "experiment_type": "transport",
+            "estimand": E_DELTA, "analysis_status": VALIDATED}
+    base.update(kw)
+    return base
+
+
+def test_require_schema_rejects_each_dimension():
+    ok = dict(expected_schema="2.2", expected_experiment="transport",
+              allowed_estimands={E_DELTA}, allowed_statuses={VALIDATED})
+    require_schema(_hdr(), **ok)                                    # admissible
+    for bad in (_hdr(schema_version="2.1"),                         # stale schema
+                _hdr(experiment_type="necessity"),                  # wrong experiment
+                _hdr(estimand=E_ABSOLUTE),                          # unapproved estimand
+                _hdr(analysis_status=EXPLORATORY),                  # unapproved status
+                {}):                                                # unstamped legacy file
+        try:
+            require_schema(bad, **ok)
+            assert False, f"require_schema must reject {bad}"
+        except ValueError:
+            pass
+    # opt-in widening admits the legacy estimand/status
+    assert admits(_hdr(estimand=E_ABSOLUTE, analysis_status=LEGACY),
+                  expected_schema="2.2", expected_experiment="transport",
+                  allowed_estimands={E_DELTA, E_ABSOLUTE}, allowed_statuses={VALIDATED, LEGACY})
+
+
+def test_stamp_includes_provenance():
+    s = stamp("2.2", "transport", estimand=E_DELTA)
+    for k in ("schema_version", "experiment_type", "estimand", "analysis_status",
+              "code_commit", "dirty_worktree"):
+        assert k in s, f"stamp missing {k}"
+    assert set(git_metadata()) == {"code_commit", "dirty_worktree"}
+
+
+def test_paired_by_key_strict():
+    ka = [(1, 2, 3), (4, 5, 6)]
+    d, order = paired_by_key([10.0, 20.0], ka, [1.0, 2.0], ka)
+    assert list(d) == [9.0, 18.0] and order == sorted(ka)
+    # REORDERED second condition must still pair correctly by key (position would be wrong)
+    d2, _ = paired_by_key([10.0, 20.0], ka, [2.0, 1.0], [(4, 5, 6), (1, 2, 3)])
+    assert list(d2) == [9.0, 18.0]
+    for bad in (([1.0, 2.0], [(1, 1, 1), (1, 1, 1)]),          # duplicate keys
+                ([1.0, 2.0], [(9, 9, 9), (4, 5, 6)])):         # different case set
+        try:
+            paired_by_key([10.0, 20.0], ka, bad[0], bad[1])
+            assert False, "paired_by_key must reject mismatched/duplicate keys"
+        except ValueError:
+            pass
+
+
+def test_seed_stats_and_hier_boot():
+    # signal beats every control seed -> P(beat)=1 and even the worst-control margin is positive
+    M = np.full((20, 5), 0.8) + RNG.standard_normal((20, 5)) * 0.01
+    s = seed_stats(M)
+    assert s["p_beats_random_control"] == 1.0
+    assert s["vs_worst_control"] > 0 and s["vs_strong_control_q90"] > 0
+    lo, hi = hier_boot(M, None, B=1000)
+    assert lo > 0, "hierarchical CI should exclude 0 when signal dominates every seed"
+    # a signal that only beats the control MEAN has P(beat) well below 1
+    M2 = np.tile(np.array([2.0, -1.0, 0.5, -0.5, 0.2]), (20, 1))
+    assert seed_stats(M2)["p_beats_random_control"] < 0.8
+    assert seed_stats(M2)["vs_worst_control"] < 0
 
 
 def test_aggregate_uses_clean_contrasts():

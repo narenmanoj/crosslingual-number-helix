@@ -26,6 +26,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as C
+from src.provenance import require_schema, VALIDATED, E_GEOMETRY
+
 AXES = ["script", "notation", "language"]
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
 
@@ -34,6 +38,10 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--out-dir", default="experiments")
     p.add_argument("--glob", default="structure_*.json", help="authoritative clean-contrast source")
+    p.add_argument("--schema", default=None, help="required schema_version (default: config.SCHEMA_VERSION)")
+    p.add_argument("--strict", dest="strict", action="store_true", default=True,
+                   help="refuse files failing the schema/estimand gate (default); --no-strict warns instead")
+    p.add_argument("--no-strict", dest="strict", action="store_false")
     return p.parse_args()
 
 
@@ -61,10 +69,22 @@ def main():
               "(or pass --glob 'align_*.json' for the confounded per-form contrasts).")
         sys.exit(0)
 
+    schema = args.schema or C.SCHEMA_VERSION
     rows, sources = [], set()
     for fp in files:
         with open(fp) as fh:
             d = json.load(fh)
+        # fail-fast admission: a stale pre-overhaul JSON must never enter the cross-model H2 table
+        exp = "structure" if "clean_contrasts" in d else "align"
+        try:
+            require_schema(d, expected_schema=schema, expected_experiment=exp,
+                           allowed_estimands={E_GEOMETRY}, allowed_statuses={VALIDATED},
+                           source=os.path.basename(fp))
+        except ValueError as e:
+            if args.strict:
+                raise SystemExit(f"\nREFUSED: {e}\n\nRegenerate it, or re-run with --no-strict to skip.\n")
+            print(f"  skip (inadmissible): {e}")
+            continue
         vals, src = axis_values(d)
         sources.add(src)
         rows.append({

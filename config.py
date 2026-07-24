@@ -6,7 +6,10 @@
 #   2.0 = post round-2 (centered fit, delta transport, fail-fast tokens, hook asserts, FDR-on-perm)
 #   2.1 = post round-3 (norm-matched necessity controls + per-seed, delta interchange, case keys,
 #         rank-aware overlap propagated, schema versioning, sweeps marked stale)
-SCHEMA_VERSION = "2.1"
+#   2.2 = post round-4 (ENFORCED schema/experiment_type/estimand/analysis_status, delta transport is
+#         the default estimand + legacy absolute patching opt-in, structured delta controls with
+#         per-seed retention, cross-fit ablation baseline, cluster-level permutation p, git provenance)
+SCHEMA_VERSION = "2.2"
 
 # Base models are cleaner for number geometry than chat-tuned ones. The causal legs need BASE
 # models (instruct models score ~0 clean_acc on "a + b = "); the representational legs (H2 +
