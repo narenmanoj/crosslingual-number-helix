@@ -131,8 +131,19 @@ exploratory estimand, or any baseline fallback. A failed job therefore fails the
 being papered over by a stale file.
 
 Knobs: `MODELS`, `FORMS`, `POSITIONS` (default `last span after`), `PAIRS` (**0 = all valid triples**,
-the production default), `CTRL_SEEDS`, `NSEEDS`, `RUN_SWEEPS=1` to add exploratory sweeps,
-`ALLOW_DIRTY=1` for a scratch run.
+the production default), `CTRL_SEEDS`, `NSEEDS`, `RUN_SWEEPS=1` to add exploratory sweeps.
+
+**Production vs scratch.** Production is the default and requires a clean worktree. `ALLOW_DIRTY=1`
+declares a **scratch** run: results are explicitly not reportable, and the writers' production
+contract is disabled (a layer manifest frozen from a dirty tree could never satisfy it).
+
+**What counts as a positive result.** A cell is a headline positive only when it is FDR-significant
+**and** its **crossed** interval — resampling both cases and the global control seeds — excludes zero.
+Which control subspaces happened to be drawn is part of the scientific uncertainty, so the case-only
+interval is reported as a conditional-on-this-bank diagnostic and never as the headline. Necessity
+cells for forms the model cannot actually solve (clean accuracy below the preregistered threshold)
+are labelled `not_testable_due_to_clean_behavior` and excluded from the primary family rather than
+being counted as nulls.
 
 Layers can also be frozen on their own:
 

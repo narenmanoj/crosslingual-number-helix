@@ -324,7 +324,7 @@ def test_seed_stats_and_crossed_boot():
     M = np.full((20, 5), 0.8) + RNG.standard_normal((20, 5)) * 0.01
     s = seed_stats(M)
     assert s["p_beats_random_control"] == 1.0
-    assert s["vs_worst_control"] > 0 and s["vs_strong_control_q90"] > 0
+    assert s["vs_worst_control"] > 0 and s["vs_strong_control"] > 0
     lo, hi = crossed_boot(M, None, B=1000)
     assert lo > 0, "crossed CI should exclude 0 when signal dominates every seed"
     # a signal that only beats the control MEAN has P(beat) well below 1
@@ -400,16 +400,18 @@ def test_run_dir_validation_rejects_bad_runs(tmpdir=None):
     import json
     import shutil
     import tempfile
-    from src.provenance import validate_run_dir, write_manifest
+    from src.provenance import validate_run_dir, write_manifest, record_completion
     d = tempfile.mkdtemp()
     try:
         man = write_manifest(d, run_id="t", schema_version="2.2", expected_models=["M1", "M2"],
                              expected_experiments=["transport"], expected_forms=["en_digit"], allow_dirty=True)
         cm = man["code_commit"]      # results must share the manifest's commit
+        record_completion(d, "transport:M1", "ok"); record_completion(d, "transport:M2", "ok")
         def res(model, commit=None, **kw):
             return {"experiment_type": "transport", "model": model, "schema_version": "2.2",
                     "analysis_status": "validated", "model_revision": {"name": model},
-                    "code_commit": commit or cm, "dirty_worktree": False, **kw}
+                    "code_commit": commit or cm, "dirty_worktree": False,
+                    "results": {"en_digit": {"n_cases": 10}}, "all_cases_processed": True, **kw}
         ok = [("t_M1.json", res("M1")), ("t_M2.json", res("M2"))]
         validate_run_dir(d, ok)                                        # clean run passes
         mixed = ok + [("t_M3.json", res("M3", commit="XYZ"))]
@@ -507,7 +509,7 @@ def test_manifest_enforces_exact_cells_and_zero_fallback():
     """Blocker #4 + #6: exact expected-cell set, unexpected files, and baseline fallbacks all fail."""
     import shutil
     import tempfile
-    from src.provenance import validate_run_dir, write_manifest
+    from src.provenance import validate_run_dir, write_manifest, record_completion
     d = tempfile.mkdtemp()
     try:
         man = write_manifest(d, run_id="t", schema_version="2.3", expected_models=["M"],
@@ -516,18 +518,23 @@ def test_manifest_enforces_exact_cells_and_zero_fallback():
                                               "ablation_position": p} for p in ("last", "span", "after")],
                              allow_dirty=True)
         cm = man["code_commit"]
+        for p_ in ("last", "span", "after"):
+            record_completion(d, f"necessity:M:{p_}", "ok")
+
         def mk(pos, **kw):
-            return (f"n_{pos}.json", {"experiment_type": "necessity", "model": "M", "schema_version": "2.3",
-                                      "analysis_status": "validated", "model_revision": {"name": "M"},
-                                      "code_commit": cm, "dirty_worktree": False,
-                                      "ablation_position": pos, **kw})
+            body = {"experiment_type": "necessity", "model": "M", "schema_version": "2.3",
+                    "analysis_status": "validated", "model_revision": {"name": "M"},
+                    "code_commit": cm, "dirty_worktree": False, "ablation_position": pos,
+                    "ablation": {"en_digit": {"n": 10}}, "all_cases_processed": True}
+            body.update(kw)
+            return (f"n_{pos}.json", body)
         full = [mk(p) for p in ("last", "span", "after")]
         validate_run_dir(d, full)                                   # complete run passes
         for bad, why in ((full[:2], "missing a position"),
                          (full + [mk("last")], "duplicate position"),
                          (full + [("x.json", {**mk("post")[1], "ablation_position": "post"})], "unexpected cell"),
-                         ([mk("last", ablation={"en": {"n_skipped_no_baseline": 3}}), full[1], full[2]],
-                          "baseline skips")):
+                         ([mk("last", ablation={"en_digit": {"n": 10, "n_skipped_no_baseline": 3}}),
+                           full[1], full[2]], "baseline skips")):
             try:
                 validate_run_dir(d, bad)
                 assert False, f"must reject: {why}"
@@ -589,6 +596,195 @@ def test_overnight_runner_is_manifest_driven():
 
 
 E_ABLATION_ID = "norm_matched_subspace_ablation"
+
+
+# ---- audit round 7: go/no-go blockers ----
+def _src(rel):
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parent.parent / rel).read_text()
+
+
+def test_runner_passes_production_to_writers():
+    """Blocker #1: the writers' production contract is inert unless the runner activates it."""
+    s = _src("scripts/run_overnight.sh")
+    assert "PROD_FLAGS=(--production)" in s, "production must be the default writer mode"
+    for line in ("run_transport.py", "run_necessity.py"):
+        idx = s.index(line)
+        assert '"${PROD_FLAGS[@]}"' in s[idx:idx + 400], f"{line} must receive the production flags"
+    # scratch mode (dirty tree) must disable it, else every scratch job fails for the wrong reason
+    assert "PROD_FLAGS=()" in s and "MODE=scratch" in s
+    assert "export POSITIONS" in s, "POSITIONS must be exported for the manifest builder"
+
+
+def test_runner_handles_empty_arrays_under_set_u():
+    """Correctness: with `set -u`, "${arr[@]}" on an EMPTY array is an unbound-variable error on
+    bash 3.2 (macOS default). PROD_FLAGS/NEWRUN_FLAGS/PAIRS_FLAG are all empty in normal
+    configurations -- PAIRS_FLAG is empty in the PRODUCTION default (PAIRS=0)."""
+    import subprocess
+    s = _src("scripts/run_overnight.sh")
+    for name in ("PROD_FLAGS", "NEWRUN_FLAGS", "PAIRS_FLAG"):
+        guarded = f'"${{{name}[@]+"${{{name}[@]}}"}}"'
+        assert guarded in s, f"{name} must use the \"${{arr[@]+...}}\" idiom"
+        # strip the guarded occurrences, then no BARE expansion may remain
+        assert f'"${{{name}[@]}}"' not in s.replace(guarded, ""), \
+            f"{name} still has a bare empty-array expansion somewhere"
+    # the unsafe form really does fail, so the guard is not cosmetic
+    bad = subprocess.run(["bash", "-c", 'set -u; A=(); printf "%s" "${A[@]}"'],
+                         capture_output=True, text=True)
+    good = subprocess.run(["bash", "-c", 'set -u; A=(); printf "%s" "${A[@]+"${A[@]}"}"'],
+                          capture_output=True, text=True)
+    assert good.returncode == 0, "the safe idiom must work"
+    if bad.returncode == 0:          # newer bash tolerates it; the guard still matters for bash 3.2
+        pass
+
+
+def test_runner_passes_exhaustive_case_flag():
+    """Correctness: PAIRS=0 (exhaustive) must reach the writer. Omitting --pairs-per-form would fall
+    back to the writer's sampled default, silently defeating the all-valid-cases requirement."""
+    s = _src("scripts/run_overnight.sh")
+    assert 'PAIRS_FLAG=(--pairs-per-form "$PAIRS")' in s, "PAIRS must always be passed explicitly"
+    assert 'PAIRS_FLAG=(); [[ "$PAIRS" != "0" ]]' not in s, "the conditional-omit form is the bug"
+
+
+def test_geometry_uses_evaluation_values_only():
+    """Blocker #2: final geometry must be fit on held-out evaluation values, not the discovery ones."""
+    for rel in ("scripts/run_fit_and_align.py", "scripts/run_structure.py"):
+        s = _src(rel)
+        assert "eval_idx" in s, f"{rel} must index the evaluation subset"
+        assert "geometry_uses_discovery_values" in s, f"{rel} must record the split provenance"
+        assert "fit_helix(acts[f][layer], numbers" not in s, f"{rel} still fits on ALL numbers"
+        assert "fit_helix(H, numbers" not in s, f"{rel} still fits on ALL numbers"
+
+
+def test_headline_requires_crossed_interval():
+    """Blocker #3: a cell whose crossed CI includes 0 must not be a headline positive."""
+    from analyze_stats import add_row, build_cell
+    rng = np.random.default_rng(0)
+    n, k = 30, 6
+    # strong between-seed spread: case-only CI excludes 0, crossed CI should not
+    offs = np.array([-1.4, -0.9, 0.3, 1.0, 1.6, 2.2])
+    M = offs[None, :] + rng.standard_normal((n, k)) * 0.02
+    keys = [(i, i + 1, 1) for i in range(n)]
+    cell = build_cell(np.ones(n) + M.mean(1), np.ones(n), keys, seed_matrix=M, cluster_by=0)
+    rows = []
+    add_row(rows, "delta_vs_shuf_fourier", "M", "en_digit", "script", cell, 800, require_crossed=True)
+    r = rows[0]
+    assert r["sig_ci"], "case-only CI should exclude 0 in this construction"
+    assert not r["sig_crossed"], "crossed CI must include 0 given the large between-seed spread"
+    r["sig_fdr"] = True
+    headline = bool(r["sig_fdr"] and r["sig_crossed"])
+    assert not headline, "headline must require the crossed interval"
+    assert (r["primary_lo"], r["primary_hi"]) == (r["crossed_lo"], r["crossed_hi"]), \
+        "the reported interval must be the crossed one"
+
+
+def test_analyzer_tracks_and_fails_on_dropped_primary_cells():
+    """Blocker #4: dropped cells are recorded and invalidate a production run."""
+    s = _src("scripts/analyze_stats.py")
+    assert "dropped_primary" in s and "PRODUCTION RUN REJECTED" in s
+    assert "def drop(" in s, "every omission must go through the recorder"
+    assert "dropped_cells" in s, "dropped cells must be written to the stats JSON"
+
+
+def test_validator_rejects_empty_payload_and_zero_cases():
+    """Blocker #5: empty results/ablation and zero processed cases must fail."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.3", expected_models=["M"],
+                             expected_experiments=["transport"], expected_forms=["en_digit"],
+                             expected_cells=[{"experiment_type": "transport", "model": "M"}],
+                             allow_dirty=True)
+        record_completion(d, "transport:M", "ok")
+        cm = man["code_commit"]
+        base = {"experiment_type": "transport", "model": "M", "schema_version": "2.3",
+                "analysis_status": "validated", "model_revision": {"name": "M"},
+                "code_commit": cm, "dirty_worktree": False, "all_cases_processed": True}
+        validate_run_dir(d, [("t.json", {**base, "results": {"en_digit": {"n_cases": 8}}})])
+        for payload, why in (({}, "empty results"),
+                             ({"en_digit": {"n_cases": 0}}, "zero processed cases")):
+            try:
+                validate_run_dir(d, [("t.json", {**base, "results": payload})])
+                assert False, f"must reject: {why}"
+            except ValueError:
+                pass
+        # unprocessed cases must fail too (blocker #10)
+        try:
+            validate_run_dir(d, [("t.json", {**base, "results": {"en_digit": {"n_cases": 8}},
+                                             "all_cases_processed": False,
+                                             "skipped_case_keys": {"en_digit": [[1, 2]]}})])
+            assert False, "must reject unprocessed cases"
+        except ValueError:
+            pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_span_admissibility_requires_every_position():
+    """Blocker #6: mean alpha can hide two out-of-range positions; require ALL of them in band."""
+    from src.patching import ALPHA_LO, ALPHA_HI
+    a_list = [0.1, 5.0]                              # mean 2.55 is "in range", both ends are not
+    assert ALPHA_LO <= float(np.mean(a_list)) <= ALPHA_HI, "the mean really is misleadingly in-band"
+    assert not all(ALPHA_LO <= x <= ALPHA_HI for x in a_list), "the all() rule must reject it"
+    s = _src("scripts/run_necessity.py")
+    assert "all(ALPHA_LO <= x <= ALPHA_HI for x in a_list)" in s, "necessity must use the all() rule"
+
+
+def test_manifest_experiments_match_expected_cells():
+    """Blocker #7: the manifest must not promise experiments the run never registers."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.3", expected_models=["M"],
+                             expected_experiments=["transport", "necessity", "structure"],
+                             expected_forms=[], allow_dirty=True,
+                             expected_cells=[{"experiment_type": "transport", "model": "M"}])
+        record_completion(d, "transport:M", "ok")
+        res = [("t.json", {"experiment_type": "transport", "model": "M", "schema_version": "2.3",
+                           "analysis_status": "validated", "model_revision": {"name": "M"},
+                           "code_commit": man["code_commit"], "dirty_worktree": False,
+                           "results": {"en_digit": {"n_cases": 5}}, "all_cases_processed": True})]
+        try:
+            validate_run_dir(d, res)
+            assert False, "declaring 'structure' while registering only transport must fail"
+        except ValueError as e:
+            assert "expected_experiments" in str(e)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_manifest_freezes_analysis_policy():
+    """Blocker #8: every threshold that changes inclusion/significance is frozen in the manifest."""
+    from src.provenance import default_analysis_policy
+    pol = default_analysis_policy()
+    for k in ("alpha_range", "min_case_fraction", "min_admitted_seeds", "cluster_by", "bootstrap_B",
+              "primary_requires_crossed_ci", "global_fdr_sensitivity", "clean_accuracy_threshold",
+              "require_all_cases_processed"):
+        assert k in pol, f"analysis policy must freeze {k}"
+    s = _src("scripts/analyze_stats.py")
+    assert "PRODUCTION POLICY CONFLICT" in s, "conflicting CLI overrides must be rejected"
+    assert "--global-fdr" in _src("scripts/run_overnight.sh"), "runner must honour the FDR promise"
+
+
+def test_clean_behaviour_gate_excludes_incompetent_forms():
+    """Blocker #9: a form the model cannot solve must not enter the primary necessity family."""
+    from analyze_stats import eligible_clean
+    ok, acc = eligible_clean({"clean_acc": 0.95}, 0.8)
+    assert ok and acc == 0.95
+    ok, acc = eligible_clean({"clean_acc": 0.12}, 0.8)
+    assert not ok, "chance-level clean accuracy must be ineligible"
+    assert eligible_clean({}, 0.8)[0], "blocks without a clean_acc field are ungated"
+    assert "not_testable_due_to_clean_behavior" in _src("scripts/analyze_stats.py")
+
+
+def test_necessity_claims_always_carry_position():
+    """Correctness: 'necessity' must not silently mean whichever position was listed first."""
+    s = _src("scripts/analyze_stats.py")
+    assert 'suffix = f"@{pos}"' in s, "the ablation position must always be explicit in the claim"
 
 
 def test_aggregate_uses_clean_contrasts():

@@ -174,11 +174,29 @@ def cell_matches(expected: dict, cell: tuple) -> bool:
     return True
 
 
+def default_analysis_policy(**over) -> dict:
+    """FROZEN analysis thresholds (audit r7 blocker #8). Everything that can change which cells are
+    included or called significant lives here, is written into the run manifest BEFORE the run, and is
+    enforced in production -- so a report cannot be re-derived with friendlier settings."""
+    pol = {"alpha_range": list(ALPHA_RANGE),
+           "min_case_fraction": 0.8,
+           "min_admitted_seeds": 5,
+           "cluster_by": 0,                      # 0 = source value
+           "bootstrap_B": 20000,
+           "primary_requires_crossed_ci": True,  # blocker #3
+           "global_fdr_sensitivity": True,
+           "clean_accuracy_threshold": 0.8,      # blocker #9 (necessity eligibility)
+           "necessity_positions": ["last", "span", "after"],
+           "require_all_cases_processed": True}  # blocker #10
+    pol.update(over)
+    return pol
+
+
 def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_models: list,
                    expected_experiments: list, expected_forms: list, expected_cells: list = None,
                    primary_families: list = None, secondary_families: list = None,
                    baseline_policy: str = "disjoint_calibration", required_fallback_count: int = 0,
-                   allow_dirty: bool = False) -> dict:
+                   analysis_policy: dict = None, allow_dirty: bool = False) -> dict:
     """Declare up-front what this run MUST produce, so a partial run cannot be silently analyzed.
 
     `expected_cells` enumerates the EXACT cells (including intervention positions) the run must emit;
@@ -200,6 +218,7 @@ def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_m
            "global_fdr_sensitivity": True,
            "baseline_policy": baseline_policy,
            "required_fallback_count": required_fallback_count,
+           "analysis_policy": analysis_policy or default_analysis_policy(),
            "allow_dirty": allow_dirty, "completion": {}}
     with open(os.path.join(run_dir, "manifest.json"), "w") as fh:
         json.dump(man, fh, indent=2)
@@ -248,7 +267,7 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
             problems.append(f"{name}: {d.get('analysis_status')} result in a validated production report")
         if not d.get("model_revision"):
             problems.append(f"{name}: no model_revision recorded")
-        # zero-fallback baseline policy (blocker #6)
+        # zero-fallback baseline policy (r6 blocker #6)
         for form, A in (d.get("ablation") or {}).items():
             if A.get("n_skipped_no_baseline"):
                 problems.append(f"{name}[{form}]: {A['n_skipped_no_baseline']} case(s) skipped for want of a baseline")
@@ -256,12 +275,22 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
                 if any(v.get("fallback_used") for v in pm.values()):
                     problems.append(f"{name}[{form}]: baseline fallback used")
                     break
-        # expected forms present
+        # NON-EMPTY payload + expected forms present (r7 blocker #5). The old check was `if got and
+        # not subset`, so an EMPTY results/ablation dict silently satisfied it.
+        payload = d.get("results") or d.get("ablation") or {}
+        if not payload:
+            problems.append(f"{name}: empty results/ablation payload")
         want_forms = set(man.get("expected_forms") or [])
-        if want_forms:
-            got = set((d.get("results") or d.get("ablation") or {}).keys())
-            if got and not want_forms.issubset(got):
-                problems.append(f"{name}: missing expected forms {sorted(want_forms - got)}")
+        if want_forms and not want_forms.issubset(set(payload)):
+            problems.append(f"{name}: missing expected forms {sorted(want_forms - set(payload))}")
+        # every present form must have actually processed cases (r7 blockers #5/#10)
+        for form, blk in payload.items():
+            n_cases = blk.get("n_cases", blk.get("n"))
+            if n_cases is not None and n_cases <= 0:
+                problems.append(f"{name}[{form}]: zero processed cases")
+            if d.get("all_cases_processed") is False:
+                problems.append(f"{name}[{form}]: selected cases != processed cases "
+                                f"(skipped: {d.get('skipped_case_keys')})")
 
     if len(commits) > 1:
         problems.append(f"results span MULTIPLE code commits {sorted(map(str, commits))}")
@@ -288,9 +317,19 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
         if missing:
             problems.append(f"manifest expected models with no results: {missing}")
 
+    # the manifest must not promise experiments the run never registered (r7 blocker #7)
+    if expected:
+        declared = set(man.get("expected_experiments") or [])
+        in_cells = {c.get("experiment_type") for c in expected}
+        if declared and declared != in_cells:
+            problems.append(f"manifest expected_experiments {sorted(declared)} != experiment types in "
+                            f"expected_cells {sorted(in_cells)} -- declare the run's actual scope")
+
     incomplete = {k: v for k, v in (man.get("completion") or {}).items() if v.get("status") != "ok"}
     if incomplete:
         problems.append(f"jobs not completed successfully: {sorted(incomplete)}")
+    if not (man.get("completion") or {}):
+        problems.append("no job completion records -- the runner did not register its jobs")
 
     if problems:
         raise ValueError(f"{run_dir}: " + "; ".join(problems))

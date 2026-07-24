@@ -141,9 +141,11 @@ def seed_stats(seed_diff):
     """Control-distribution summaries: how the signal fares against the WHOLE control set, not just
     its mean (audit r4 #4). seed_diff[i][j] is oriented so positive supports the claim."""
     M = np.asarray(seed_diff, float)
+    # NB: diff = signal - control, so the 10th percentile of diffs is the comparison against a
+    # STRONG (90th-percentile) control. Named for what it measures, not the percentile index.
     return {"p_beats_random_control": float(np.mean(M > 0)),          # P(signal beats a random control draw)
             "vs_mean_control": float(M.mean(1).mean()),
-            "vs_strong_control_q90": float(np.mean(np.percentile(M, 10, axis=1))),  # vs a strong control
+            "vs_strong_control": float(np.mean(np.percentile(M, 10, axis=1))),
             "vs_worst_control": float(np.mean(M.min(axis=1)))}
 
 
@@ -205,7 +207,11 @@ def build_cell(values_a, values_b, keys, seed_matrix=None, cluster_by=0):
     keys = [tuple(k) for k in keys]
     diff, order = paired_by_key(values_a, keys, values_b, keys)
     pos = {k: i for i, k in enumerate(keys)}
-    groups = np.array([k[cluster_by] if len(k) > cluster_by else 0 for k in order])
+    if any(len(k) <= cluster_by for k in order):
+        raise ValueError(f"--cluster-by {cluster_by} exceeds the case-key length "
+                         f"{min(len(k) for k in order)}; pick a valid key index "
+                         "(0=source, 1=target/addend depending on experiment)")
+    groups = np.array([k[cluster_by] for k in order])
     sm = None
     if seed_matrix is not None:
         sm_full = np.asarray(seed_matrix, float)
@@ -222,8 +228,15 @@ def build_cell(values_a, values_b, keys, seed_matrix=None, cluster_by=0):
     return (diff, groups, sm, order) if len(diff) >= 2 else None
 
 
-def add_row(rows, claim, tag, form, axis, cell, B, status=VALIDATED, extra=None):
-    """cell = (diff, groups, seed_matrix|None, keys) from build_cell()."""
+def add_row(rows, claim, tag, form, axis, cell, B, status=VALIDATED, extra=None,
+            require_crossed=True):
+    """cell = (diff, groups, seed_matrix|None, keys) from build_cell().
+
+    HEADLINE GATE (audit r7 blocker #3): for any comparison against a random/shuffled control BANK,
+    which global control subspaces happened to be drawn is part of the scientific uncertainty. So a
+    cell counts as a positive result only if BOTH the case-clustered interval and the CROSSED
+    (case x global-seed) interval exclude zero. `sig_ci` alone is a conditional-on-this-bank
+    diagnostic and is never the headline."""
     diff, groups, seed_diff, keys = cell
     lo, hi = cluster_boot(diff, groups, B)
     row = {"claim": claim, "model": tag, "form": form, "axis": axis, "status": status,
@@ -234,9 +247,16 @@ def add_row(rows, claim, tag, form, axis, cell, B, status=VALIDATED, extra=None)
            "sig_ci": bool(lo > 0 or hi < 0)}
     if seed_diff is not None:
         row.update(seed_stats(seed_diff))
-        clo, chi = crossed_boot(seed_diff, groups, B)   # crossed case x seed CI (blocker #3)
+        clo, chi = crossed_boot(seed_diff, groups, B)
         row["crossed_lo"], row["crossed_hi"] = clo, chi
-        row["sig_crossed"] = bool(clo > 0 or chi < 0)   # the most conservative interval
+        row["sig_crossed"] = bool(clo > 0 or chi < 0)
+        # primary interval shown in tables/figures is the crossed one when it exists
+        row["primary_lo"], row["primary_hi"] = (clo, chi) if require_crossed else (lo, hi)
+        row["sig_primary_interval"] = row["sig_crossed"] if require_crossed else row["sig_ci"]
+    else:
+        row["primary_lo"], row["primary_hi"] = lo, hi
+        row["sig_crossed"] = None
+        row["sig_primary_interval"] = row["sig_ci"]
     if extra:
         row.update(extra)
     rows.append(row)
@@ -283,6 +303,11 @@ def parse_args():
                    help="fail a cell if fewer control seeds survive global admissibility (audit r6 #2)")
     p.add_argument("--min-case-frac", type=float, default=0.8,
                    help="a seed is admitted when alpha is in-band for >= this fraction of cases")
+    p.add_argument("--clean-acc-threshold", type=float, default=0.8,
+                   help="necessity eligibility: forms below this clean accuracy are not testable (r7 #9)")
+    p.add_argument("--require-crossed", dest="require_crossed", action="store_true", default=True,
+                   help="headline positives require BOTH the clustered and CROSSED intervals (r7 #3)")
+    p.add_argument("--no-require-crossed", dest="require_crossed", action="store_false")
     p.add_argument("--global-fdr", action="store_true", default=False,
                    help="also report a single BH correction across ALL primary cells (audit r5 #9)")
     return p.parse_args()
@@ -304,9 +329,55 @@ def load_admissible(path, args, *, experiment, estimands, statuses):
     return d
 
 
+def eligible_clean(block, threshold):
+    """BLOCKER 9: a necessity result is meaningless when the model cannot do the clean task in that
+    form -- a drop from chance to chance proves nothing. Returns (ok, clean_acc)."""
+    acc = block.get("clean_acc")
+    if acc is None:
+        return True, None                      # transport-style blocks carry no gate
+    return (float(acc) >= threshold), float(acc)
+
+
 def main():
     args = parse_args()
-    rows, skipped, loaded = [], [], []
+    rows, skipped, loaded, dropped = [], [], [], []
+
+    # BLOCKER 8: in production the manifest FREEZES the analysis policy. CLI values that disagree are
+    # rejected rather than silently winning, so a report cannot be re-derived with friendlier settings.
+    policy = None
+    mpath = os.path.join(args.out_dir, "manifest.json")
+    if args.production and os.path.exists(mpath):
+        policy = (json.load(open(mpath)) or {}).get("analysis_policy")
+    if policy:
+        conflicts = []
+        for key, attr in (("min_admitted_seeds", "min_admitted_seeds"),
+                          ("min_case_fraction", "min_case_frac"),
+                          ("cluster_by", "cluster_by"),
+                          ("bootstrap_B", "b"),
+                          ("clean_accuracy_threshold", "clean_acc_threshold"),
+                          ("primary_requires_crossed_ci", "require_crossed")):
+            frozen, got = policy.get(key), getattr(args, attr)   # NB: not `want` -- that shadows want()
+            if frozen is None:
+                continue
+            explicit = any(a.startswith("--" + attr.replace("_", "-")) for a in sys.argv[1:])
+            if explicit and frozen != got:
+                conflicts.append(f"--{attr.replace('_', '-')}={got} conflicts with frozen {key}={frozen}")
+            setattr(args, attr, frozen)
+        if list(policy.get("alpha_range", [])) not in ([], [ALPHA_LO, ALPHA_HI]):
+            conflicts.append(f"frozen alpha_range {policy['alpha_range']} != code ({ALPHA_LO}, {ALPHA_HI})")
+        if conflicts:
+            raise SystemExit("\nPRODUCTION POLICY CONFLICT:\n  " + "\n  ".join(conflicts) + "\n")
+        if policy.get("global_fdr_sensitivity"):
+            args.global_fdr = True
+        print(f"analysis policy (frozen by manifest): min_admitted_seeds={args.min_admitted_seeds}, "
+              f"cluster_by={args.cluster_by}, B={args.b}, clean_acc>={args.clean_acc_threshold}, "
+              f"crossed_required={args.require_crossed}")
+
+    def drop(claim, tag, form, reason, **kw):
+        """BLOCKER 4: every omitted cell is recorded with a reason so production can fail on it
+        instead of quietly shrinking the significance table."""
+        dropped.append({"claim": claim, "model": tag, "form": form, "reason": reason, **kw})
+        print(f"  DROP {claim} {tag}:{form} -- {reason}")
 
     # ---------------- transport: delta (primary) + optional legacy absolute ----------------
     for f in sorted(glob.glob(os.path.join(args.out_dir, "transport_*_L*.json"))):
@@ -339,9 +410,10 @@ def main():
                         keep, seed_report = admit_global_seeds(adm_all[fam]["admissible"],
                                                                min_case_frac=args.min_case_frac)
                         if len(keep) < args.min_admitted_seeds:
-                            print(f"  DROP {claim} {tag}:{form} -- only {len(keep)} admitted control "
-                                  f"seed(s) < required {args.min_admitted_seeds} "
-                                  f"(alpha outside {ALPHA_LO}-{ALPHA_HI})")
+                            drop(claim, tag, form,
+                                 f"only {len(keep)} admitted control seed(s) < required "
+                                 f"{args.min_admitted_seeds} (alpha outside {ALPHA_LO}-{ALPHA_HI})",
+                                 n_admitted=len(keep))
                             continue
                         M = M[:, keep]                       # NO imputation: drop whole seeds only
                     # BLOCKER 2: the PRIMARY estimate/CI/p must come from the ADMITTED controls
@@ -351,8 +423,10 @@ def main():
                 else:
                     sd = None
                 cell = build_cell(pc["delta"], control_mean, dk, seed_matrix=sd, cluster_by=args.cluster_by)
-                if cell:
-                    add_row(rows, claim, tag, form, ax, cell, args.b,
+                if cell is None:
+                    drop(claim, tag, form, "fewer than 2 usable cases after keyed pairing")
+                elif True:
+                    add_row(rows, claim, tag, form, ax, cell, args.b, require_crossed=args.require_crossed,
                             extra={"alpha_frac_out": R.get("delta_alpha", {}).get(fam, {}).get("frac_out_of_range"),
                                    "seed_admission": seed_report,
                                    "controls_used": "admitted_global_seeds" if seed_report else "all_seeds"})
@@ -376,10 +450,17 @@ def main():
         if args.positions and pos not in args.positions:
             continue
         loaded.append((os.path.basename(f), d))
-        suffix = "" if pos == args.positions[0] else f"@{pos}"     # keep positions as distinct cells
+        suffix = f"@{pos}"      # ALWAYS explicit: no position is silently "the" necessity claim
         for form, A in d.get("ablation", {}).items():
             pc = A.get("per_case", {})
             if args.null not in pc.get("controls", {}) or not pc.get("keys"):
+                drop("necessity" + suffix, tag, form, "missing per-case control/keys arrays")
+                continue
+            ok_clean, clean_acc = eligible_clean(A, args.clean_acc_threshold)
+            if not ok_clean:
+                drop("necessity" + suffix, tag, form,
+                     f"not_testable_due_to_clean_behavior (clean_acc={clean_acc:.2f} < "
+                     f"{args.clean_acc_threshold})", clean_acc=clean_acc, not_testable=True)
                 continue
             sm = pc.get("controls_by_seed", {}).get(args.null)
             adm = A.get("control_diagnostics", {}).get(args.null, {}).get("admissible")
@@ -390,8 +471,9 @@ def main():
                 if args.admissible_only and adm:
                     keep, seed_report = admit_global_seeds(adm, min_case_frac=args.min_case_frac)
                     if len(keep) < args.min_admitted_seeds:
-                        print(f"  DROP necessity{suffix} {tag}:{form} -- only {len(keep)} admitted "
-                              f"control seed(s) < required {args.min_admitted_seeds}")
+                        drop("necessity" + suffix, tag, form,
+                             f"only {len(keep)} admitted control seed(s) < required "
+                             f"{args.min_admitted_seeds}", n_admitted=len(keep))
                         continue
                     M = M[:, keep]                           # whole seeds only, no imputation
                 null_mean = M.mean(axis=1)                   # PRIMARY uses admitted controls (blocker #2)
@@ -399,9 +481,11 @@ def main():
             # effect = null_acc - helix_acc  (positive => ablating the helix hurts MORE)
             cell = build_cell(null_mean, pc["helix"], pc["keys"],
                               seed_matrix=sd, cluster_by=args.cluster_by)
-            if cell:
+            if cell is None:
+                drop("necessity" + suffix, tag, form, "fewer than 2 usable cases after keyed pairing")
+            else:
                 add_row(rows, "necessity" + suffix, tag, form, A.get("axis", axis_of(form)), cell, args.b,
-                        extra={"ablation_position": pos, "seed_admission": seed_report,
+                        require_crossed=args.require_crossed, extra={"ablation_position": pos, "seed_admission": seed_report, "clean_acc": clean_acc,
                                "controls_used": "admitted_global_seeds" if seed_report else "all_seeds",
                                "n_skipped_no_baseline": A.get("n_skipped_no_baseline")})
         for form, I in (d.get("interchange", {}) if args.interchange else {}).items():
@@ -448,8 +532,11 @@ def main():
             raise SystemExit(f"\nPRODUCTION RUN REJECTED: {e}\n")
 
     if not rows:
-        print("No admissible per-case data found. Re-run the experiments (schema "
-              f"{args.schema}) or pass --include-* flags.")
+        msg = (f"No admissible per-case data found (schema {args.schema}). "
+               "Re-run the experiments or pass --include-* flags.")
+        if args.production:
+            raise SystemExit(f"\nPRODUCTION RUN REJECTED: {msg}\n")
+        print(msg)
         return
 
     # ---------------- FDR over the DEFAULT family only (opt-in claims excluded) ----------------
@@ -469,6 +556,10 @@ def main():
     for r in rows:                       # opt-in claims are reported but never FDR-corrected here
         r.setdefault("q", float("nan"))
         r.setdefault("sig_fdr", False)
+    # HEADLINE gate: FDR-significant AND the crossed (case x global-seed) interval excludes zero.
+    for r in rows:
+        crossed_ok = r["sig_crossed"] if r.get("sig_crossed") is not None else r["sig_ci"]
+        r["headline"] = bool(r["sig_fdr"] and (crossed_ok if args.require_crossed else r["sig_ci"]))
 
     # ---------------- table ----------------
     def flag(b):
@@ -477,17 +568,17 @@ def main():
                              r["model"], r["form"]))
     print("\n" + "=" * 134)
     print(f"PAIRED TESTS  (schema {args.schema}; B={args.b}; necessity null={args.null}; FDR alpha={args.alpha})")
-    print("  CI = cluster bootstrap by source value | perm p = CLUSTER-level sign flip | q = BH-FDR (default family only)")
-    print("  P(beat ctrl) = fraction of (case, control-seed) draws the signal beats | xCI = CROSSED CI over case clusters x global control seeds")
+    print("  CI shown = CROSSED (cases x global control seeds) | perm p = cluster sign flip | q = BH-FDR")
+    print("  HEAD = headline positive: FDR-significant AND the crossed interval excludes 0")
     print("-" * 134)
     print(f"  {'claim':<21}{'model':<21}{'form':<18}{'axis':<9}{'effect':>8}{'95% CI':>17}"
-          f"{'perm_p':>8}{'q':>7}{'P(beat)':>9}{'CI':>4}{'FDR':>5}{'xCI':>6}{'n':>5}")
+          f"{'perm_p':>8}{'q':>7}{'P(beat)':>9}{'xCI':>5}{'FDR':>5}{'HEAD':>6}{'n':>5}")
     for r in rows:
-        ci = f"[{r['lo']:.2f}, {r['hi']:.2f}]"
+        ci = f"[{r['primary_lo']:.2f}, {r['primary_hi']:.2f}]"
         pb = f"{r['p_beats_random_control']:.2f}" if "p_beats_random_control" in r else "  -"
         hh = flag(r["sig_crossed"]) if "sig_crossed" in r else "-"
         print(f"  {r['claim']:<21}{r['model'][:20]:<21}{r['form']:<18}{r['axis']:<9}{r['effect']:>8.3f}{ci:>17}"
-              f"{r['perm_p']:>8.3f}{r['q']:>7.3f}{pb:>9}{flag(r['sig_ci']):>4}{flag(r['sig_fdr']):>5}{hh:>6}{r['n']:>5}")
+              f"{r['perm_p']:>8.3f}{r['q']:>7.3f}{pb:>9}{hh:>5}{flag(r['sig_fdr']):>5}{flag(r['headline']):>6}{r['n']:>5}")
     print("=" * 134)
     optin = [r for r in rows if r["claim"] in OPTIN_CLAIMS]
     if optin:
@@ -499,20 +590,35 @@ def main():
     for claim in DEFAULT_CLAIMS:
         cr = [r for r in default_rows if r["claim"].split("@")[0] == claim]
         if cr:
-            print(f"  {claim:<22} CI {sum(r['sig_ci'] for r in cr):>2}/{len(cr):<2}   "
-                  f"FDR {sum(r['sig_fdr'] for r in cr):>2}/{len(cr):<2}")
+            print(f"  {claim:<22} xCI {sum(bool(r.get('sig_crossed')) for r in cr):>2}/{len(cr):<2}   "
+                  f"FDR {sum(r['sig_fdr'] for r in cr):>2}/{len(cr):<2}   "
+                  f"HEADLINE {sum(r['headline'] for r in cr):>2}/{len(cr):<2}")
 
     models = sorted({r["model"] for r in default_rows})
     present = [c for c in DEFAULT_CLAIMS if any(r["claim"].split("@")[0] == c for r in default_rows)]
     if models and present:
-        print("\nPER-MODEL fraction of forms significant (FDR):")
+        print("\nPER-MODEL fraction of forms HEADLINE-positive (FDR and crossed CI):")
         print(f"  {'model':<24}" + "".join(f"{c[:14]:>16}" for c in present))
         for mdl in models:
             cells = "".join(
-                (lambda cr: f"{(sum(r['sig_fdr'] for r in cr) / len(cr)):>16.2f}" if cr else f"{'-':>16}")(
+                (lambda cr: f"{(sum(r['headline'] for r in cr) / len(cr)):>16.2f}" if cr else f"{'-':>16}")(
                     [r for r in default_rows if r["model"] == mdl and r["claim"].split("@")[0] == c])
                 for c in present)
             print(f"  {mdl[:23]:<24}{cells}")
+
+    # ---------------- BLOCKER 4: dropped primary cells invalidate a production run -------------
+    primary_prefixes = set(C.PRIMARY_FAMILIES)
+    dropped_primary = [d for d in dropped if d["claim"].split("@")[0] in primary_prefixes]
+    if dropped:
+        print(f"\nDROPPED CELLS ({len(dropped)}; {len(dropped_primary)} in a PRIMARY family):")
+        for d in dropped:
+            mark = "PRIMARY" if d in dropped_primary else "       "
+            print(f"  [{mark}] {d['claim']:<22}{d['model']:<20}{d['form']:<18}{d['reason']}")
+    if args.production and dropped_primary:
+        raise SystemExit(
+            f"\nPRODUCTION RUN REJECTED: {len(dropped_primary)} primary analysis cell(s) were dropped "
+            "-- a report cannot silently omit cells from its own denominator. Fix the underlying "
+            "cause (controls / clean accuracy / case coverage) or preregister the omission.\n")
 
     # ---------------- json + forest (default family only) ----------------
     out = {"schema_version": args.schema, "bootstrap_B": args.b, "necessity_null": args.null,
@@ -520,6 +626,9 @@ def main():
            "included_legacy": args.legacy, "included_exploratory": args.exploratory,
            "admissible_only": args.admissible_only, "cluster_by": args.cluster_by,
            "positions": args.positions, "production_validated": args.production,
+           "analysis_policy": policy, "require_crossed": args.require_crossed,
+           "clean_acc_threshold": args.clean_acc_threshold,
+           "dropped_cells": dropped, "primary_families": C.PRIMARY_FAMILIES,
            "skipped_files": [os.path.basename(s) for s in skipped], "rows": rows}
     with open(os.path.join(args.out_dir, "stats_summary.json"), "w") as fh:
         json.dump(out, fh, indent=2)
@@ -534,17 +643,22 @@ def main():
             y = np.arange(len(cr))[::-1]
             for yi, r in zip(y, cr):
                 col = AXIS_COLORS.get(r["axis"], "#333")
-                ax.plot([r["lo"], r["hi"]], [yi, yi], color=col, lw=1.5, alpha=1 if r["sig_ci"] else 0.4)
-                if r["sig_ci"]:
+                ax.plot([r["primary_lo"], r["primary_hi"]], [yi, yi], color=col, lw=1.5,
+                        alpha=1 if r["headline"] else 0.4)
+                if r["headline"]:
                     ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="o",
-                               facecolors=col if r["sig_fdr"] else "none", edgecolors=col)
+                               facecolors=col, edgecolors=col)
+                elif r["sig_ci"]:
+                    ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="o",
+                               facecolors="none", edgecolors=col)
                 else:
                     ax.scatter([r["effect"]], [yi], s=30, zorder=3, marker="x", color=col)
             ax.axvline(0, color="#999", lw=1, ls="--")
             ax.set_yticks(y); ax.set_yticklabels([f"{r['model']}:{r['form']}" for r in cr], fontsize=6)
             ax.set_xlabel(xlabel); ax.set_title(claim, fontsize=9)
             ax.grid(axis="x", alpha=0.2)
-        fig.suptitle("validated family only · filled = FDR-significant · open = CI-only · × = n.s.", fontsize=9)
+        fig.suptitle("crossed (case x seed) intervals · filled = headline (FDR + crossed) · open = case-CI only · × = n.s.",
+                 fontsize=9)
         fig.tight_layout()
         png = os.path.join(args.out_dir, "stats_forest.png")
         fig.savefig(png, dpi=130)

@@ -91,6 +91,7 @@ def main():
                            "evaluation_numbers": evaluation, "candidate_layers": candidates,
                            "selected_layer": layer,
                            "selection_frozen_before_crossform_evaluation": True,
+                           "geometry_uses_discovery_values": False,
                            "per_layer": sel["per_layer"]}
         print(f"\nChosen layer {layer} via INDEPENDENT protocol "
               f"({ref} only, {len(discovery)} discovery values, held-out R^2)")
@@ -100,18 +101,21 @@ def main():
                            "selection_frozen_before_crossform_evaluation": False}
         print(f"\nUsing layer: {layer}")
 
-    # --- fit helix per form at the chosen layer ---
+    # --- fit helix per form at the chosen layer, on EVALUATION VALUES ONLY (audit r7 blocker #2) ---
+    # The layer was chosen because en_digit generalized well on the DISCOVERY values; reusing those
+    # values in the reported geometry would not be fully held out. Everything below sees `evaluation`.
+    eval_idx = [numbers.index(v) for v in evaluation]
     fits, r2s, r2ho, shuf = {}, {}, {}, {}
     for f in forms:
-        H = acts_by_form[f][layer]
-        fits[f] = fit_helix(H, numbers, k_pca=args.k_pca)
+        H = acts_by_form[f][layer][eval_idx]
+        fits[f] = fit_helix(H, evaluation, k_pca=args.k_pca)
         r2s[f] = fits[f]["r2"]
-        r2ho[f] = heldout_r2(H, numbers, k_pca=args.k_pca)[0]     # audit #7: honest generalization R^2
-        shuf[f] = shuffled_control_r2(H, numbers, k_pca=args.k_pca)
+        r2ho[f] = heldout_r2(H, evaluation, k_pca=args.k_pca)[0]   # honest generalization R^2
+        shuf[f] = shuffled_control_r2(H, evaluation, k_pca=args.k_pca)
 
     # --- alignment vs reference ---
     ref_dirs = fits[ref]["helix_dirs_model"]
-    ref_H = acts_by_form[ref][layer]
+    ref_H = acts_by_form[ref][layer][eval_idx]
     floor = random_subspace_floor(ref_dirs, d_model)
 
     rows = []
@@ -119,10 +123,10 @@ def main():
         if f == ref:
             continue
         sa = subspace_alignment(ref_dirs, fits[f]["helix_dirs_model"])
-        cka = linear_cka(ref_H, acts_by_form[f][layer])
-        proc = orthogonal_procrustes_cv(ref_H, acts_by_form[f][layer])
+        cka = linear_cka(ref_H, acts_by_form[f][layer][eval_idx])
+        proc = orthogonal_procrustes_cv(ref_H, acts_by_form[f][layer][eval_idx])
         coord = canonical_map_cosines(fits[ref], fits[f])         # audit #1: coordinate-level identity
-        perm = permutation_alignment_null(ref_H, acts_by_form[f][layer], numbers, k_pca=args.k_pca)
+        perm = permutation_alignment_null(ref_H, acts_by_form[f][layer][eval_idx], evaluation, k_pca=args.k_pca)
         rows.append((f, D.FORMS[f].axis, sa["mean_cos"], cka, proc,
                      coord["mean_abs_cos"], coord["mean_signed_cos"], perm["null_q95"]))
 
@@ -179,8 +183,13 @@ def main():
         **stamp(C.SCHEMA_VERSION, "align", estimand=E_GEOMETRY, analysis_status=VALIDATED),
         "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
         "n_numbers": len(numbers), "d_model": d_model, "layer_selection": layer_selection,
+        "layer_discovery_values": discovery, "geometry_fit_values": evaluation,
+        "geometry_evaluation_values": evaluation, "geometry_uses_discovery_values": False,
         "r2": r2s, "r2_heldout": r2ho, "r2_shuffled": shuf, "random_subspace_floor": floor,
-        "axis_summary": axis_summary,
+        # CONFOUNDED: every form vs en_digit, so "language" changes notation AND language.
+        # The authoritative H2 contrasts are run_structure.py clean_contrasts (audit r7 geometry #1).
+        "axis_summary_confounded_vs_en_digit": axis_summary,
+        "authoritative_h2_source": "run_structure.py clean_contrasts",
         "alignment": [
             {"form": f, "axis": axis, "subspace_mean_cos": mc,
              "procrustes_cv_r2": proc, "linear_cka": cka,

@@ -774,10 +774,50 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
 - **Gate B verified live:** isolated dir, frozen layer (L2 from 28 candidates, held-out R²=0.567),
   3/3 jobs `ok`, zero baseline fallbacks, `RUN VALIDATED`; an injected stale file → *"unexpected result
   cell not in manifest"*; a failed job → *"jobs not completed successfully"*.
-- ☐ **Open (need new data / decisions):** carrier-language factorial (#13); joint-span necessity;
+**Round 7 (go/no-go audit) — all 10 blockers closed + a correctness sweep:**
+- ✅ **B1 Writers actually run in production mode.** The runner passes the production contract to both
+  writers (`PROD_FLAGS`), so `resolve_layer` enforces manifest/protocol/commit *at write time*, not
+  only at analysis. `ALLOW_DIRTY=1` now declares an explicit **scratch** run and disables it (a layer
+  manifest frozen from a dirty tree can never satisfy the contract).
+- ✅ **B2 Geometry is evaluated on held-out values.** Both geometry scripts fit and align using the
+  **evaluation** split only; discovery values never re-enter the reported geometry
+  (`geometry_uses_discovery_values: false`).
+- ✅ **B3 Crossed uncertainty is the headline gate.** A positive cell now requires **FDR-significant
+  AND crossed (case × global-seed) CI excluding 0**; tables and forest plots draw the crossed
+  interval; the case-only CI is retained as a conditional-on-this-bank diagnostic.
+- ✅ **B4 Dropped primary cells fail the run.** Every omission goes through a recorder with a reason;
+  production rejects the run if any cell in a primary family was dropped, and the reasons ship in the
+  stats JSON.
+- ✅ **B5 Empty/zero-case artifacts rejected.** The `if got and …` hole is closed; empty
+  `results`/`ablation`, zero processed cases, and a zero-row production analysis all fail.
+- ✅ **B6 Span admissibility requires every position.** Positionwise α arrays are retained and a
+  case-seed control is admissible only if **all** patched positions are in band (mean α hid
+  `[0.1, 5.0]`).
+- ✅ **B7 Manifest scope matches the jobs.** The runner declares `--experiments transport necessity`
+  (causal-only) and the validator rejects any mismatch between `expected_experiments` and the cells.
+- ✅ **B8 Analysis policy frozen in the manifest** (α range, min seeds/case-fraction, cluster key,
+  B, crossed requirement, clean-accuracy threshold, global-FDR); production reads it and **rejects
+  conflicting CLI overrides**; the runner now actually passes `--global-fdr`.
+- ✅ **B9 Clean-behaviour eligibility gate.** Forms below the preregistered clean accuracy are labelled
+  `not_testable_due_to_clean_behavior` and excluded from the primary necessity family.
+- ✅ **B10 Processed == selected cases.** Writers record expected/processed/skipped keys; production
+  raises on a token-span failure instead of silently shrinking a form's case set.
+
+**Correctness sweep (beyond the audit):**
+- `necessity` claims now **always** carry their ablation position — previously "necessity" silently
+  meant whichever position was listed first.
+- `--cluster-by` now errors when the index exceeds the case-key length, instead of collapsing every
+  case into one cluster and returning a silent NaN CI.
+- `--intervention-pos after` no longer **clamps to the last token** when the number ends the prompt
+  (which would have made "after" and "last" the same intervention under different labels).
+- Renamed the misleading `vs_strong_control_q90` (it is the 10th percentile of *differences*).
+- Legacy absolute modes now warn that they **extrapolate** the helix (fit 10–99, reconstruct 0–9).
+- `run_fit_and_align`'s confounded per-form-vs-`en_digit` summary is renamed
+  `axis_summary_confounded_vs_en_digit` with `authoritative_h2_source` pointing at `run_structure`.
+- ☐ **Open (need new data / decisions):** carrier-language factorial; joint-span necessity;
   continuation-likelihood / word-form readouts; coordinate-level bootstrap CIs + no-rotation
-  cross-prediction (#12); downstream-**sensitivity**-matched controls (norm matching is not
-  sensitivity matching); cluster sensitivity beyond source value (#10, flag exists — needs reporting).
+  cross-prediction; downstream-**sensitivity**-matched controls; cluster sensitivity reporting beyond
+  source value (flag exists, needs to be run and tabulated).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,

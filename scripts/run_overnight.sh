@@ -15,8 +15,12 @@
 # Usage:
 #   RUN_ID=pilot01 MODELS="Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407" bash scripts/run_overnight.sh
 #   RUN_ID=smoke   MODELS="Qwen/Qwen2.5-1.5B" PAIRS=0 ALLOW_DIRTY=1 bash scripts/run_overnight.sh
+# SCOPE: this is a CAUSAL-ONLY production run (transport + necessity). Geometry/structure jobs
+# are a separate run; the manifest declares exactly that so the two cannot be confused.
 # ============================================================================
 set -uo pipefail
+# NOTE: with `set -u`, an empty array must be expanded as "${arr[@]+"${arr[@]}"}" --
+# plain "${arr[@]}" is an unbound-variable error on bash 3.2 (macOS default).
 cd "$(dirname "$0")/.." || exit 1
 
 if [[ -z "${PY:-}" ]]; then
@@ -27,6 +31,7 @@ ROOT="${ROOT:-experiments}"
 MODELS="${MODELS:-Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407}"
 FORMS="${FORMS:-en_digit devanagari_digit arabic_indic_digit es_word fr_word}"
 POSITIONS="${POSITIONS:-last span after}"   # audit r6 #9: necessity at all three positions
+export POSITIONS                             # the manifest builder reads this from the environment
 NSEEDS="${NSEEDS:-10}"
 CTRL_SEEDS="${CTRL_SEEDS:-8}"
 PAIRS="${PAIRS:-0}"                          # 0 => ALL valid triples (audit r6 #8)
@@ -34,19 +39,26 @@ ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 RUN_SWEEPS="${RUN_SWEEPS:-0}"
 CLEAN_CACHE="${CLEAN_CACHE:-1}"
 
-DIRTY_FLAGS=(--no-allow-dirty); NEWRUN_FLAGS=()
-if [[ "$ALLOW_DIRTY" == "1" ]]; then DIRTY_FLAGS=(--allow-dirty); NEWRUN_FLAGS=(--allow-dirty); fi
+# PRODUCTION is the default. ALLOW_DIRTY=1 declares a SCRATCH run (not a reportable result), which
+# also turns off the writers' --production contract -- layers frozen from a dirty tree cannot satisfy
+# it, so leaving --production on would make every scratch job fail for the wrong reason.
+DIRTY_FLAGS=(--no-allow-dirty); NEWRUN_FLAGS=(); PROD_FLAGS=(--production); MODE=production
+if [[ "$ALLOW_DIRTY" == "1" ]]; then
+  DIRTY_FLAGS=(--allow-dirty); NEWRUN_FLAGS=(--allow-dirty); PROD_FLAGS=(); MODE=scratch
+fi
 
 # ---------------------------------------------------------------- 1. isolated run dir + manifest
 RUN_DIR="$("$PY" scripts/new_run.py --run-id "$RUN_ID" --root "$ROOT" \
-            --models $MODELS --forms $FORMS "${NEWRUN_FLAGS[@]}" \
+            --models $MODELS --forms $FORMS --experiments transport necessity "${NEWRUN_FLAGS[@]+"${NEWRUN_FLAGS[@]}"}" \
             | sed -n 's/^Run directory: //p')"
 if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
   echo "FATAL: could not create the run directory (dirty worktree? see scripts/new_run.py)"; exit 1
 fi
 mkdir -p "$RUN_DIR/logs"
 LOG="$RUN_DIR/logs/run.log"
-echo "=== production run $RUN_ID -> $RUN_DIR ($(date)) ===" | tee "$LOG"
+echo "=== $MODE run $RUN_ID -> $RUN_DIR ($(date)) ===" | tee "$LOG"
+[[ "$MODE" == "scratch" ]] && echo "NOTE: scratch mode -- results are NOT reportable "\
+  "(dirty worktree; writer --production contract disabled)" | tee -a "$LOG"
 
 # ---------------------------------------------------------------- 2. freeze layers (independent)
 LAYERS="$RUN_DIR/layers.json"
@@ -84,15 +96,18 @@ record() {  # record(job_id, status, detail)
 from src.provenance import record_completion; record_completion(*sys.argv[1:])" "$RUN_DIR" "$1" "$2" "$3"
 }
 
-PAIRS_FLAG=(); [[ "$PAIRS" != "0" ]] && PAIRS_FLAG=(--pairs-per-form "$PAIRS")
+# PAIRS=0 means EXHAUSTIVE -- it must be passed through explicitly. Omitting the flag would
+# silently fall back to the writer's own default (80 sampled triples), quietly defeating the
+# "use every valid case" requirement.
+PAIRS_FLAG=(--pairs-per-form "$PAIRS")
 
 for MODEL in $MODELS; do
   echo "" | tee -a "$LOG"; echo "#### $MODEL ($(date +%H:%M:%S))" | tee -a "$LOG"
 
   echo ">> transport" | tee -a "$LOG"
-  if "$PY" scripts/run_transport.py --model "$MODEL" --layer-manifest "$LAYERS" \
-        --forms $FORMS "${PAIRS_FLAG[@]}" --delta-ctrl-seeds "$CTRL_SEEDS" \
-        --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]}" 2>&1 | tee -a "$LOG"; then
+  if "$PY" scripts/run_transport.py --model "$MODEL" --layer-manifest "$LAYERS" "${PROD_FLAGS[@]+"${PROD_FLAGS[@]}"}" \
+        --forms $FORMS "${PAIRS_FLAG[@]+"${PAIRS_FLAG[@]}"}" --delta-ctrl-seeds "$CTRL_SEEDS" \
+        --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]+"${DIRTY_FLAGS[@]}"}" 2>&1 | tee -a "$LOG"; then
     record "transport:$MODEL" ok ""
   else
     record "transport:$MODEL" failed "see logs/run.log"; echo "!! transport FAILED for $MODEL" | tee -a "$LOG"
@@ -100,9 +115,9 @@ for MODEL in $MODELS; do
 
   for POS in $POSITIONS; do          # audit r6 #9: last / span / after
     echo ">> necessity ($POS)" | tee -a "$LOG"
-    if "$PY" scripts/run_necessity.py --model "$MODEL" --layer-manifest "$LAYERS" \
-          --intervention-pos "$POS" --forms $FORMS "${PAIRS_FLAG[@]}" --n-seeds "$NSEEDS" \
-          --on-baseline-fallback error --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]}" 2>&1 | tee -a "$LOG"; then
+    if "$PY" scripts/run_necessity.py --model "$MODEL" --layer-manifest "$LAYERS" "${PROD_FLAGS[@]+"${PROD_FLAGS[@]}"}" \
+          --intervention-pos "$POS" --forms $FORMS "${PAIRS_FLAG[@]+"${PAIRS_FLAG[@]}"}" --n-seeds "$NSEEDS" \
+          --on-baseline-fallback error --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]+"${DIRTY_FLAGS[@]}"}" 2>&1 | tee -a "$LOG"; then
       record "necessity:$MODEL:$POS" ok ""
     else
       record "necessity:$MODEL:$POS" failed "see logs/run.log"
@@ -124,7 +139,8 @@ done
 # ---------------------------------------------------------------- 4. production analysis
 echo "" | tee -a "$LOG"
 echo "=== production analysis (rejects incomplete / mixed / stale runs) ===" | tee -a "$LOG"
-"$PY" scripts/analyze_stats.py --out-dir "$RUN_DIR" --production --b 20000 2>&1 | tee -a "$LOG"
+ANALYZE_FLAGS=(--global-fdr); [[ "$MODE" == "production" ]] && ANALYZE_FLAGS+=(--production)
+"$PY" scripts/analyze_stats.py --out-dir "$RUN_DIR" "${ANALYZE_FLAGS[@]+"${ANALYZE_FLAGS[@]}"}" 2>&1 | tee -a "$LOG"
 STATUS=$?
 echo "" | tee -a "$LOG"
 if [[ $STATUS -eq 0 ]]; then

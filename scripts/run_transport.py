@@ -176,6 +176,10 @@ def main():
         print(f"  control bank [{fam}]: kept {rep['n_kept']}/{rep['n_candidates']} candidates, "
               f"implied alpha {np.round(rep['implied_alpha'], 2).tolist()}")
     recon = helix_reconstruct(fit, list(range(0, args.max_sum + 1)))  # target vectors for a' (legacy modes)
+    if args.legacy_absolute and disjoint:
+        print("  WARN: legacy absolute modes reconstruct values 0..{} from a helix fit on {}..{} -- "
+              "that is an EXTRAPOLATION outside the fit range; treat those rows as diagnostic only."
+              .format(args.max_sum, args.fit_min, args.fit_max))
     ans_ids = continuation_answer_ids(tok, range(0, args.max_sum + 1))  # audit #2/#9: fail-fast, no fallback
 
     def argmax_answer(logits):
@@ -229,6 +233,7 @@ def main():
                 for f in DELTA_FAMILIES}
         case_keys, delta_keys = [], []     # audit #12: (a, a', b) per case, aligned to the per-case arrays
         clean_correct = 0
+        skipped_keys = []
         n_proc = 0  # cases that survived token-span identification (the honest denominator)
         for (a, ap, b) in cases:
             a_str = D.FORMS[form].render(a)
@@ -236,6 +241,10 @@ def main():
             try:
                 idxs = _number_token_indices(tok, prompt, a_str)
             except ValueError:
+                skipped_keys.append([a, ap, b])          # BLOCKER 10
+                if args.production:
+                    raise SystemExit(f"token-span extraction failed for {form} (a={a}, a'={ap}, b={b}); "
+                                     "production requires every expected case to be processed")
                 continue
             pos = idxs[-1]
             n_proc += 1
@@ -318,6 +327,10 @@ def main():
             "per_case_shift": {m: [float(s) for s in per_mode[m]["shift"]] for m in all_modes},
             # per-case (a, a', b) keys for exact pairing + clustered inference (audit #11/#12)
             "per_case_keys": {"modes": case_keys, "delta": delta_keys},
+            "expected_case_keys": [list(k) for k in cases],
+            "processed_case_keys": [list(k) for k in case_keys],
+            "skipped_case_keys": skipped_keys,
+            "all_cases_processed": len(skipped_keys) == 0,
             # full case x seed control matrices -- never only the mean (audit r4 #4)
             "delta_control_by_seed": ctrl_by_seed,
             "control_seeds": ctrl_seeds,
@@ -377,6 +390,9 @@ def main():
            "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
            "value_sets_disjoint": disjoint,
            "case_set_hash": case_set_hash, "case_set_exhaustive": len(cases) == len(all_cases),
+           "all_cases_processed": all(v.get("all_cases_processed", True) for v in results.values()),
+           "skipped_case_keys": {f: v.get("skipped_case_keys", []) for f, v in results.items()
+                                 if v.get("skipped_case_keys")},
            "results": results}
     tag = args.model.split("/")[-1]
     path = os.path.join(args.out_dir, f"transport_{tag}_L{args.layer}.json")

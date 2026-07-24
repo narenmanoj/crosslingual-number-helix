@@ -116,7 +116,9 @@ def main():
         layer_selection = {"method": "cli_argument", "selected_layer": layer,
                            "selection_frozen_before_crossform_evaluation": False}
 
-    fits = {f: fit_helix(acts[f][layer], numbers, k_pca=args.k_pca) for f in forms}
+    # BLOCKER 2: final geometry uses EVALUATION values only (disjoint from layer discovery)
+    eval_idx = [numbers.index(v) for v in evaluation]
+    fits = {f: fit_helix(acts[f][layer][eval_idx], evaluation, k_pca=args.k_pca) for f in forms}
     floor = random_subspace_floor(fits[forms[0]]["helix_dirs_model"], d_model)
 
     # ---------- (#6) pairwise subspace_cos matrix ----------
@@ -272,6 +274,8 @@ def main():
            "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(), "form_ranks": form_ranks,
            "layer_selection": layer_selection,
+           "layer_discovery_values": discovery, "geometry_fit_values": evaluation,
+           "geometry_evaluation_values": evaluation, "geometry_uses_discovery_values": False,
            # audit #8: this file is the AUTHORITATIVE H2 source. Its clean_contrasts use the correct
            # reference per axis; the everything-vs-en_digit axis_summary in align_*.json is confounded.
            "contrast_definition": {"script": "en_digit_vs_other_digit_scripts",

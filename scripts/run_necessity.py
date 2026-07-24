@@ -114,7 +114,12 @@ def intervention_positions(idxs, mode, seq_len):
     if mode == "span":
         return list(idxs)
     if mode == "after":
-        return [min(idxs[-1] + 1, seq_len - 1)]
+        nxt = idxs[-1] + 1
+        if nxt > seq_len - 1:
+            # clamping would silently turn an "after" intervention into a "last" one, making the two
+            # positions incomparable while still being labelled differently.
+            raise ValueError("no token after the number span; 'after' is undefined for this prompt")
+        return [nxt]
     raise ValueError(mode)
 
 
@@ -244,12 +249,19 @@ def main():
         baseline_meta = []          # per-case, per-position baseline provenance (audit r5 #7)
         n_skipped_baseline = 0
         tok_counts, n = [], 0
+        skipped_keys = []
         for (a, b) in ab_cases:
             a_str = D.FORMS[form].render(a)
             prompt = f"{a_str} + {b} = "
             try:
                 idxs = _number_token_indices(tok, prompt, a_str)
             except ValueError:
+                # BLOCKER 10: never silently drop a case in production -- an unprocessed case changes
+                # the effective case set for this form only, breaking cross-form comparability.
+                skipped_keys.append([a, b])
+                if args.production:
+                    raise SystemExit(f"token-span extraction failed for {form} (a={a}, b={b}); "
+                                     "production requires every expected case to be processed")
                 continue
             Lc, hidden, seq_len = forward(model, tok, device, prompt, layer=args.layer, want_hidden=True)
             positions = intervention_positions(idxs, args.intervention_pos, seq_len)
@@ -293,9 +305,12 @@ def main():
                         nrs = float(np.linalg.norm(_proj(Q, hidden[p] - base[p])))
                         _, dg = norm_match_diag(_proj(Qc, hidden[p] - base[p]), nrs)
                         a_list.append(dg["alpha"]); r_list.append(dg["raw_norm"]); m_list.append(dg["matched_norm"])
-                    s_alpha.append(float(np.mean(a_list))); s_raw.append(float(np.mean(r_list)))
-                    s_matched.append(float(np.mean(m_list)))
-                    s_adm.append(bool(ALPHA_LO <= np.mean(a_list) <= ALPHA_HI))
+                    # BLOCKER 6: each position is scaled INDEPENDENTLY, so a mean alpha can hide two
+                    # pathological positions (0.1 and 5.0 average to 2.55, "in range", though neither
+                    # is). Admissible only if EVERY patched position is in band; keep the full array.
+                    s_alpha.append([float(x) for x in a_list])
+                    s_raw.append(float(np.mean(r_list))); s_matched.append(float(np.mean(m_list)))
+                    s_adm.append(bool(all(ALPHA_LO <= x <= ALPHA_HI for x in a_list)))
                     ctrl_alpha[c].extend(a_list)
                 ctrl_case[c].append(float(np.mean(seed_correct)))
                 ctrl_case_by_seed[c].append([int(s) for s in seed_correct])
@@ -409,6 +424,9 @@ def main():
            "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
            "value_sets_disjoint": set(range(args.fit_min, args.fit_max + 1)).isdisjoint(range(0, args.max_sum + 1)),
            "case_set_hash": case_set_hash, "case_set_exhaustive": len(ic_cases) == len(all_ic),
+           "all_cases_processed": all(v.get("all_cases_processed", True) for v in ablation.values()),
+           "skipped_case_keys": {f: v.get("skipped_case_keys", []) for f, v in ablation.items()
+                                 if v.get("skipped_case_keys")},
            "controls_norm_matched": True, "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}
