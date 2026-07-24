@@ -272,7 +272,7 @@ def main():
 
     # peak table -- report the HELD-OUT Δ at the discovery-selected peak (avoids winner's curse),
     # plus the removed-helix-energy at that layer (intervention norm varies with depth: the raw peak
-    # is NOT a clean read-layer; see README Limitations).
+    # is NOT a clean read-layer; see progress.md Limitations).
     print("\n" + "=" * 96)
     print("NECESSITY PEAK per form  (peak layer chosen on DISCOVERY half, Δ reported on HELD-OUT half)")
     print("  Δ vs random = helix vs noise (weak null) | Δ vs shuf_fourier = helix vs matched STRUCTURED null (strong)")

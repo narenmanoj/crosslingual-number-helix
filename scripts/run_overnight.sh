@@ -35,7 +35,7 @@ STRIDE="${STRIDE:-2}"          # ablation-sweep layer stride (1 = every layer, s
 CLEAN_CACHE="${CLEAN_CACHE:-1}"  # 0 to keep HF cache between models
 mkdir -p "$OUT_DIR"
 
-# model : causal-leg layer (from the representational sharing peak; see README H2 table).
+# model : causal-leg layer (from the representational sharing peak; see progress.md H2 table).
 # Format "org/name=LAYER". Edit LAYER if a fresh fit-and-align moves the peak.
 MODEL_LAYERS_DEFAULT=(
   "Qwen/Qwen2.5-7B=14"
