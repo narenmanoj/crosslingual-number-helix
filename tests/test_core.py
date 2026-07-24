@@ -406,15 +406,16 @@ def test_run_dir_validation_rejects_bad_runs(tmpdir=None):
         man = write_manifest(d, run_id="t", schema_version="2.2", expected_models=["M1", "M2"],
                              expected_experiments=["transport"], expected_forms=["en_digit"], allow_dirty=True)
         cm = man["code_commit"]      # results must share the manifest's commit
-        ok = [("t_M1.json", {"experiment_type": "transport", "model": "M1", "code_commit": cm, "dirty_worktree": False}),
-              ("t_M2.json", {"experiment_type": "transport", "model": "M2", "code_commit": cm, "dirty_worktree": False})]
+        def res(model, commit=None, **kw):
+            return {"experiment_type": "transport", "model": model, "schema_version": "2.2",
+                    "analysis_status": "validated", "model_revision": {"name": model},
+                    "code_commit": commit or cm, "dirty_worktree": False, **kw}
+        ok = [("t_M1.json", res("M1")), ("t_M2.json", res("M2"))]
         validate_run_dir(d, ok)                                        # clean run passes
-        mixed = ok + [("t_M3.json", {"experiment_type": "transport", "model": "M2", "code_commit": "XYZ", "dirty_worktree": False})]
-        dirty = ok + [("t_M4.json", {"experiment_type": "transport", "model": "M2", "code_commit": cm, "dirty_worktree": True})]
+        mixed = ok + [("t_M3.json", res("M3", commit="XYZ"))]
         for bad, why in ((mixed, "mixed commits"),
                          (ok[:1], "missing expected model"),
-                         (ok + [("dup.json", {"experiment_type": "transport", "model": "M1",
-                                              "code_commit": cm, "dirty_worktree": False})], "duplicate cell")):
+                         (ok + [("dup.json", res("M1"))], "duplicate cell")):
             try:
                 validate_run_dir(d, bad)
                 assert False, f"must reject: {why}"
@@ -443,6 +444,151 @@ def test_norm_match_diag_flags_off_manifold_control():
     assert np.isfinite(bad["raw_norm"]) and bad["raw_norm"] > 0, "raw norm must be retained"
     _, zero = norm_match_diag(np.zeros(3), 1.0)
     assert not zero["admissible"] and np.isinf(zero["alpha"])
+
+
+# ---- audit round 6: production-readiness blockers ----
+def test_geometry_scripts_use_independent_selector():
+    """Blocker #1: the geometry scripts must call the independent helper, not an in-sample mean scan."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for fn in ("scripts/run_fit_and_align.py", "scripts/run_structure.py"):
+        src = (root / fn).read_text()
+        assert "select_layer_independent(" in src, f"{fn} must call select_layer_independent"
+        assert "discovery_evaluation_split(" in src, f"{fn} must use a disjoint discovery split"
+        assert "layer_selection" in src, f"{fn} must record the selection provenance"
+        # the old biased scan (mean in-sample R^2 across ALL forms) must be gone
+        assert 'for f in forms])["r2"]' not in src, f"{fn} still scans in-sample R^2 across all forms"
+
+
+def test_admitted_seeds_drive_primary_estimate():
+    """Blocker #2: --admissible-only must change the POINT ESTIMATE, not just summaries, and must
+    drop whole seeds rather than impute row means."""
+    from analyze_stats import admit_global_seeds, build_cell
+    n = 12
+    # seeds 0,1 are inadmissible and carry a huge effect; seeds 2,3 are admissible and null
+    M = np.zeros((n, 4))
+    M[:, 0] = M[:, 1] = -5.0      # control shift far below signal -> huge apparent effect
+    M[:, 2] = M[:, 3] = 1.0       # admissible controls match the signal -> null effect
+    adm = np.zeros((n, 4), bool); adm[:, 2] = adm[:, 3] = True
+    keep, rep = admit_global_seeds(adm, min_case_frac=0.8)
+    assert keep == [2, 3] and rep["n_admitted"] == 2
+    sig = np.ones(n)
+    keys = [(i, i + 1, 1) for i in range(n)]
+    all_mean, adm_mean = M.mean(1), M[:, keep].mean(1)
+    eff_all = build_cell(sig, all_mean, keys)[0].mean()
+    eff_adm = build_cell(sig, adm_mean, keys)[0].mean()
+    assert abs(eff_all - eff_adm) > 1.0, "admissible-only must move the point estimate"
+    assert np.isclose(eff_adm, 0.0), "with admissible controls the effect should be null here"
+    # too few admitted seeds is detectable (the analyzer turns this into a hard cell failure)
+    none_adm = np.zeros((n, 4), bool)
+    assert admit_global_seeds(none_adm)[0] == []
+
+
+def test_no_row_mean_imputation_in_analyzer():
+    """Blocker #2: the analyzer must not fabricate seed values via row-mean imputation."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / "scripts/analyze_stats.py").read_text()
+    assert "nanmean" not in src, "row-mean imputation of missing seeds must be gone"
+    assert "admit_global_seeds(" in src, "global seed admission must be used"
+
+
+def test_result_cell_id_distinguishes_positions():
+    """Blocker #4: necessity at last/span/after is three cells, not a duplicate."""
+    from src.provenance import result_cell_id, cell_matches
+    base = {"experiment_type": "necessity", "model": "M", "estimand": E_ABLATION_ID, "layer": 14}
+    ids = {result_cell_id({**base, "ablation_position": p}) for p in ("last", "span", "after")}
+    assert len(ids) == 3, "positions must produce distinct cell ids"
+    spec = {"experiment_type": "necessity", "model": "M", "ablation_position": "span"}
+    assert cell_matches(spec, result_cell_id({**base, "ablation_position": "span"}))
+    assert not cell_matches(spec, result_cell_id({**base, "ablation_position": "last"}))
+
+
+def test_manifest_enforces_exact_cells_and_zero_fallback():
+    """Blocker #4 + #6: exact expected-cell set, unexpected files, and baseline fallbacks all fail."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.3", expected_models=["M"],
+                             expected_experiments=["necessity"], expected_forms=[],
+                             expected_cells=[{"experiment_type": "necessity", "model": "M",
+                                              "ablation_position": p} for p in ("last", "span", "after")],
+                             allow_dirty=True)
+        cm = man["code_commit"]
+        def mk(pos, **kw):
+            return (f"n_{pos}.json", {"experiment_type": "necessity", "model": "M", "schema_version": "2.3",
+                                      "analysis_status": "validated", "model_revision": {"name": "M"},
+                                      "code_commit": cm, "dirty_worktree": False,
+                                      "ablation_position": pos, **kw})
+        full = [mk(p) for p in ("last", "span", "after")]
+        validate_run_dir(d, full)                                   # complete run passes
+        for bad, why in ((full[:2], "missing a position"),
+                         (full + [mk("last")], "duplicate position"),
+                         (full + [("x.json", {**mk("post")[1], "ablation_position": "post"})], "unexpected cell"),
+                         ([mk("last", ablation={"en": {"n_skipped_no_baseline": 3}}), full[1], full[2]],
+                          "baseline skips")):
+            try:
+                validate_run_dir(d, bad)
+                assert False, f"must reject: {why}"
+            except ValueError:
+                pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_interchange_not_in_default_claims():
+    """Blocker #5: the undercontrolled interchange claim must be opt-in, not a default validated one."""
+    from analyze_stats import DEFAULT_CLAIMS, OPTIN_CLAIMS
+    assert "interchange" not in DEFAULT_CLAIMS
+    assert "interchange" in OPTIN_CLAIMS
+    assert DEFAULT_CLAIMS[0] == "delta_vs_shuf_fourier", "the admissible structured control leads"
+
+
+def test_production_requires_frozen_layer_manifest():
+    """Blocker #7: production refuses a hand-typed layer and validates the manifest's protocol."""
+    import json
+    import tempfile
+    from src.provenance import resolve_layer, git_metadata
+    try:
+        resolve_layer("M", 14, None, production=True)
+        assert False, "production must refuse a CLI layer"
+    except ValueError:
+        pass
+    layer, prov = resolve_layer("M", 14, None, production=False)
+    assert layer == 14 and prov["layer_source"] == "cli_argument"
+    g = git_metadata()
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump({"schema_version": "2.3", "selection_protocol": "en_digit_heldout_r2",
+                   "code_commit": g["code_commit"], "dirty_worktree": False,
+                   "models": {"M": {"selected_layer": 21}}}, fh)
+        path = fh.name
+    layer, prov = resolve_layer("M", None, path, schema_version="2.3", production=True)
+    assert layer == 21 and prov["layer_source"] == "frozen_manifest"
+    for kw, why in (({"schema_version": "9.9"}, "schema mismatch"),):
+        try:
+            resolve_layer("M", None, path, production=True, **kw)
+            assert False, f"must reject {why}"
+        except ValueError:
+            pass
+    try:
+        resolve_layer("OTHER", None, path, schema_version="2.3", production=True)
+        assert False, "must reject a model absent from the manifest"
+    except ValueError:
+        pass
+
+
+def test_overnight_runner_is_manifest_driven():
+    """Blocker #3: the production runner must use the hardened pipeline, not a shared directory."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / "scripts/run_overnight.sh").read_text()
+    for needle in ("scripts/new_run.py", "scripts/select_layers.py", "--layer-manifest",
+                   "--production", "record_completion", "--on-baseline-fallback error"):
+        assert needle in src, f"run_overnight.sh must use {needle}"
+    assert "MODEL_LAYERS_DEFAULT" not in src, "hard-coded layer list must be gone"
+
+
+E_ABLATION_ID = "norm_matched_subspace_ablation"
 
 
 def test_aggregate_uses_clean_contrasts():

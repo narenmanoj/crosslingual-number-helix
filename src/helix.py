@@ -89,6 +89,19 @@ def shuffled_control_r2(H, numbers, seed=0, **kw) -> float:
     return fit_helix(H, shuffled, **kw)["r2"]
 
 
+def discovery_evaluation_split(numbers, frac: float = 0.5, seed: int = 0) -> tuple:
+    """Deterministic disjoint split of the number set into (discovery, evaluation).
+
+    Uses a fixed-seed permutation rather than a contiguous or parity split: parity would make the
+    period-2 Fourier feature degenerate (cos(pi*n) is constant on even n), and a contiguous split
+    would confound the linear term with the split. Layer selection sees ONLY `discovery`; cross-form
+    geometry is scored on `evaluation` (audit r6 blocker #1)."""
+    nums = list(numbers)
+    idx = np.random.default_rng(seed).permutation(len(nums))
+    k = int(round(frac * len(nums)))
+    return sorted(nums[i] for i in idx[:k]), sorted(nums[i] for i in idx[k:])
+
+
 def select_layer_independent(acts_by_layer, discovery_values, periods=DEFAULT_PERIODS,
                              k_pca: int = 20, candidate_layers=None, seed: int = 0) -> dict:
     """Unbiased layer selection (audit r5 blocker #1).

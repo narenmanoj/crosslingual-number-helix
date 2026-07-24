@@ -41,14 +41,19 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
+from src.patching import ALPHA_LO, ALPHA_HI
 from src.provenance import (require_schema, validate_run_dir, VALIDATED, LEGACY, EXPLORATORY,
                             E_DELTA, E_ABSOLUTE, E_ABLATION, E_LAYER_VULN)
 
 AXIS_COLORS = {"script": "#2563eb", "notation": "#059669", "language": "#dc2626"}
-DEFAULT_CLAIMS = ["delta_transport", "delta_vs_pca_span", "delta_vs_shuf_fourier", "interchange", "necessity"]
-OPTIN_CLAIMS = {"sufficiency": "legacy absolute patching", "necessity_peak": "exploratory layer sweep"}
-CLAIM_ORDER = ["delta_transport", "delta_vs_pca_span", "delta_vs_shuf_fourier", "interchange",
-               "necessity", "necessity_peak", "sufficiency"]
+DEFAULT_CLAIMS = ["delta_vs_shuf_fourier", "delta_vs_pca_span", "delta_transport", "necessity"]
+# BLOCKER 5: interchange uses only Haar controls, no energy-matched bank and no alpha diagnostics, so
+# its null design is weaker than delta transport's. Delta transport already provides the sufficiency
+# test, so interchange is demoted to opt-in exploratory rather than shipped as a validated claim.
+OPTIN_CLAIMS = {"sufficiency": "legacy absolute patching", "necessity_peak": "exploratory layer sweep",
+                "interchange": "undercontrolled null (Haar only, no alpha diagnostics)"}
+CLAIM_ORDER = ["delta_vs_shuf_fourier", "delta_vs_pca_span", "delta_transport",
+               "necessity", "interchange", "necessity_peak", "sufficiency"]
 
 
 # ----------------------------- inference primitives -----------------------------
@@ -168,6 +173,25 @@ def paired(a, b):
 
 # ----------------------------- row construction -----------------------------
 
+def admit_global_seeds(admissible_matrix, min_case_frac=0.8, min_seeds=1):
+    """Decide admissibility at the GLOBAL CONTROL-SEED level (audit r6 blocker #2).
+
+    One seed == one global subspace reused across every case, so admissibility is a property of the
+    SEED, not of individual cells. A seed is admitted when its norm-match scale sits inside the
+    predefined band for at least `min_case_frac` of cases. Returns (kept_seed_indices, report).
+
+    This replaces per-cell masking + row-mean imputation, which manufactured a rectangular matrix,
+    shrank control-seed variance, and let cases with one surviving seed masquerade as fully sampled."""
+    A = np.asarray(admissible_matrix, bool)          # [n_cases, n_seeds]
+    if A.ndim != 2 or A.size == 0:
+        return [], {"n_seeds": 0, "n_admitted": 0, "per_seed_case_frac": []}
+    frac = A.mean(axis=0)                            # fraction of cases admissible, per seed
+    keep = [j for j in range(A.shape[1]) if frac[j] >= min_case_frac]
+    return keep, {"n_seeds": int(A.shape[1]), "n_admitted": len(keep),
+                  "min_case_frac": min_case_frac,
+                  "per_seed_case_frac": [float(x) for x in frac]}
+
+
 def build_cell(values_a, values_b, keys, seed_matrix=None, cluster_by=0):
     """Assemble one analysis cell with EVERYTHING aligned by case key (audit r5 blocker #4).
 
@@ -253,6 +277,12 @@ def parse_args():
                         "-- rerun with each for the dependence sensitivity analysis (audit r5 #8)")
     p.add_argument("--positions", nargs="*", default=["span", "last", "after"],
                    help="necessity ablation positions to include, read from JSON metadata (audit r5 #10)")
+    p.add_argument("--include-interchange", dest="interchange", action="store_true", default=False,
+                   help="admit the UNDERCONTROLLED delta-interchange claim (Haar-only null; audit r6 #5)")
+    p.add_argument("--min-admitted-seeds", type=int, default=3,
+                   help="fail a cell if fewer control seeds survive global admissibility (audit r6 #2)")
+    p.add_argument("--min-case-frac", type=float, default=0.8,
+                   help="a seed is admitted when alpha is in-band for >= this fraction of cases")
     p.add_argument("--global-fdr", action="store_true", default=False,
                    help="also report a single BH correction across ALL primary cells (audit r5 #9)")
     return p.parse_args()
@@ -301,21 +331,31 @@ def main():
                                      ("shuf_fourier", "delta_shuf_fourier", "delta_vs_shuf_fourier")):
                 if not ("delta" in pc and mode in pc and len(pc["delta"]) and dk):
                     continue
-                sm = by_seed.get(fam)
-                if sm and args.admissible_only and adm_all.get(fam, {}).get("admissible"):
-                    # PRIMARY analysis keeps only controls inside the predefined alpha band (r5 #6);
-                    # an all-inadmissible case yields NaN and is dropped by the aligned validity mask.
-                    admit = np.asarray(adm_all[fam]["admissible"], bool)
-                    sm = np.where(admit, np.asarray(sm, float), np.nan)
-                    sm = [row if np.isfinite(row).any() else [np.nan] * len(row) for row in sm]
-                    sm = [np.where(np.isfinite(r), r, np.nanmean(r)) if np.isfinite(r).any() else r
-                          for r in sm]
-                sig = np.asarray(pc["delta"], float)
-                sd = (sig[:, None] - np.asarray(sm, float)) if sm is not None else None
-                cell = build_cell(pc["delta"], pc[mode], dk, seed_matrix=sd, cluster_by=args.cluster_by)
+                sm, seed_report = by_seed.get(fam), None
+                control_mean = np.asarray(pc[mode], float)   # stored mean over ALL seeds
+                if sm is not None:
+                    M = np.asarray(sm, float)                                    # [cases, seeds]
+                    if args.admissible_only and adm_all.get(fam, {}).get("admissible"):
+                        keep, seed_report = admit_global_seeds(adm_all[fam]["admissible"],
+                                                               min_case_frac=args.min_case_frac)
+                        if len(keep) < args.min_admitted_seeds:
+                            print(f"  DROP {claim} {tag}:{form} -- only {len(keep)} admitted control "
+                                  f"seed(s) < required {args.min_admitted_seeds} "
+                                  f"(alpha outside {ALPHA_LO}-{ALPHA_HI})")
+                            continue
+                        M = M[:, keep]                       # NO imputation: drop whole seeds only
+                    # BLOCKER 2: the PRIMARY estimate/CI/p must come from the ADMITTED controls
+                    control_mean = M.mean(axis=1)
+                    sig = np.asarray(pc["delta"], float)
+                    sd = sig[:, None] - M
+                else:
+                    sd = None
+                cell = build_cell(pc["delta"], control_mean, dk, seed_matrix=sd, cluster_by=args.cluster_by)
                 if cell:
                     add_row(rows, claim, tag, form, ax, cell, args.b,
-                            extra={"alpha_frac_out": R.get("delta_alpha", {}).get(fam, {}).get("frac_out_of_range")})
+                            extra={"alpha_frac_out": R.get("delta_alpha", {}).get(fam, {}).get("frac_out_of_range"),
+                                   "seed_admission": seed_report,
+                                   "controls_used": "admitted_global_seeds" if seed_report else "all_seeds"})
             # LEGACY (opt-in only): absolute subspace vs absolute random
             if args.legacy and "subspace" in pc and "random" in pc and keys.get("modes"):
                 cell = build_cell(pc["subspace"], pc["random"], keys["modes"], cluster_by=args.cluster_by)
@@ -343,19 +383,28 @@ def main():
                 continue
             sm = pc.get("controls_by_seed", {}).get(args.null)
             adm = A.get("control_diagnostics", {}).get(args.null, {}).get("admissible")
-            if sm and args.admissible_only and adm:
-                sm = np.where(np.asarray(adm, bool), np.asarray(sm, float), np.nan)
-                sm = [np.where(np.isfinite(r), r, np.nanmean(r)) if np.isfinite(r).any() else r for r in sm]
             helix = np.asarray(pc["helix"], float)
-            sd = (np.asarray(sm, float) - helix[:, None]) if sm is not None else None
+            null_mean, seed_report, sd = np.asarray(pc["controls"][args.null], float), None, None
+            if sm is not None:
+                M = np.asarray(sm, float)
+                if args.admissible_only and adm:
+                    keep, seed_report = admit_global_seeds(adm, min_case_frac=args.min_case_frac)
+                    if len(keep) < args.min_admitted_seeds:
+                        print(f"  DROP necessity{suffix} {tag}:{form} -- only {len(keep)} admitted "
+                              f"control seed(s) < required {args.min_admitted_seeds}")
+                        continue
+                    M = M[:, keep]                           # whole seeds only, no imputation
+                null_mean = M.mean(axis=1)                   # PRIMARY uses admitted controls (blocker #2)
+                sd = M - helix[:, None]
             # effect = null_acc - helix_acc  (positive => ablating the helix hurts MORE)
-            cell = build_cell(pc["controls"][args.null], pc["helix"], pc["keys"],
+            cell = build_cell(null_mean, pc["helix"], pc["keys"],
                               seed_matrix=sd, cluster_by=args.cluster_by)
             if cell:
                 add_row(rows, "necessity" + suffix, tag, form, A.get("axis", axis_of(form)), cell, args.b,
-                        extra={"ablation_position": pos,
+                        extra={"ablation_position": pos, "seed_admission": seed_report,
+                               "controls_used": "admitted_global_seeds" if seed_report else "all_seeds",
                                "n_skipped_no_baseline": A.get("n_skipped_no_baseline")})
-        for form, I in d.get("interchange", {}).items():
+        for form, I in (d.get("interchange", {}) if args.interchange else {}).items():
             pc = I.get("per_case", {})
             if not pc.get("keys"):
                 continue
@@ -366,6 +415,7 @@ def main():
                               seed_matrix=sd, cluster_by=args.cluster_by)
             if cell:
                 add_row(rows, "interchange" + suffix, tag, form, I.get("axis", axis_of(form)), cell, args.b,
+                        status=EXPLORATORY,
                         extra={"interchange_position": I.get("intervention_position")})
 
     # ---------------- exploratory sweeps (opt-in only) ----------------

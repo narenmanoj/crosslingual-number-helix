@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
 from src import data as D
 from src.extract import load_model, extract_form_activations, model_revision
-from src.helix import fit_helix, shuffled_control_r2, heldout_r2
+from src.helix import (fit_helix, shuffled_control_r2, heldout_r2,
+                       select_layer_independent, discovery_evaluation_split)
 from src.alignment import (
     subspace_alignment, linear_cka, random_subspace_floor, orthogonal_procrustes_cv,
     canonical_map_cosines, permutation_alignment_null,
@@ -44,24 +45,21 @@ def parse_args():
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
+    p.add_argument("--discovery-frac", type=float, default=0.5,
+                   help="fraction of numbers reserved for layer discovery (disjoint from evaluation)")
     return p.parse_args()
 
 
-def choose_layer(acts_by_form, numbers, k_pca, candidate_layers):
-    """Pick the layer maximizing mean helix R^2 across forms."""
-    best, best_r2 = None, -1e9
-    for layer in candidate_layers:
-        r2s = [fit_helix(acts_by_form[f][layer], numbers, k_pca=k_pca)["r2"] for f in acts_by_form]
-        m = float(np.mean(r2s))
-        if m > best_r2:
-            best, best_r2 = layer, m
-    return best, best_r2
+# NOTE: the old choose_layer() maximized MEAN IN-SAMPLE R^2 across ALL forms, so the target forms
+# and the evaluation values both influenced the layer that later scored their own alignment. It is
+# replaced by select_layer_independent (en_digit only, discovery values, held-out R^2) -- audit r6 #1.
 
 
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     numbers = list(range(0, args.max_num + 1))
+    discovery, evaluation = discovery_evaluation_split(numbers, frac=args.discovery_frac, seed=0)
     forms = list(args.forms)
     ref = args.reference or forms[0]
     if ref not in forms:
@@ -82,12 +80,24 @@ def main():
 
     # --- choose layer ---
     if args.layer == "scan":
-        # scan the middle-to-late layers, where number value tends to be represented
+        # INDEPENDENT selection: reference form only, discovery values only, held-out R^2, frozen
+        # before any other form is scored (audit r6 blocker #1).
         candidates = list(range(max(1, n_layers // 3), n_layers + 1))
-        layer, mean_r2 = choose_layer(acts_by_form, numbers, args.k_pca, candidates)
-        print(f"\nChosen layer (max mean R^2): {layer}  (mean R^2={mean_r2:.3f})")
+        sel = select_layer_independent({L: acts_by_form[ref][L][[numbers.index(v) for v in discovery]]
+                                        for L in candidates},
+                                       discovery, k_pca=args.k_pca, candidate_layers=candidates)
+        layer = sel["selected_layer"]
+        layer_selection = {"method": "en_digit_heldout_r2", "discovery_numbers": discovery,
+                           "evaluation_numbers": evaluation, "candidate_layers": candidates,
+                           "selected_layer": layer,
+                           "selection_frozen_before_crossform_evaluation": True,
+                           "per_layer": sel["per_layer"]}
+        print(f"\nChosen layer {layer} via INDEPENDENT protocol "
+              f"({ref} only, {len(discovery)} discovery values, held-out R^2)")
     else:
         layer = int(args.layer)
+        layer_selection = {"method": "cli_argument", "selected_layer": layer,
+                           "selection_frozen_before_crossform_evaluation": False}
         print(f"\nUsing layer: {layer}")
 
     # --- fit helix per form at the chosen layer ---
@@ -168,7 +178,7 @@ def main():
     result = {
         **stamp(C.SCHEMA_VERSION, "align", estimand=E_GEOMETRY, analysis_status=VALIDATED),
         "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "reference": ref, "pooling": args.pooling,
-        "n_numbers": len(numbers), "d_model": d_model,
+        "n_numbers": len(numbers), "d_model": d_model, "layer_selection": layer_selection,
         "r2": r2s, "r2_heldout": r2ho, "r2_shuffled": shuf, "random_subspace_floor": floor,
         "axis_summary": axis_summary,
         "alignment": [

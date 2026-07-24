@@ -30,6 +30,8 @@ import json
 import os
 import sys
 
+import hashlib
+
 import numpy as np
 import torch
 
@@ -46,7 +48,7 @@ from src.patching import (
     patch_residual, patch_residual_multi, assert_hook_equivalence, _proj,
     norm_match_diag, ALPHA_LO, ALPHA_HI,
 )
-from src.provenance import stamp, VALIDATED, E_ABLATION
+from src.provenance import stamp, resolve_layer, VALIDATED, E_ABLATION
 
 CONTROLS = ["random", "cov_matched", "shuf_fourier"]
 
@@ -55,7 +57,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=C.MODEL)
     p.add_argument("--forms", nargs="+", default=["en_digit", "devanagari_digit", "es_word", "fr_word"])
-    p.add_argument("--layer", type=int, default=14)
+    p.add_argument("--layer", type=int, default=None)
     p.add_argument("--intervention-pos", default="last", choices=["last", "span", "after"])
     p.add_argument("--ablation-baseline", default="form_arith", choices=["form_arith", "carrier"],
                    help="mean-ablation target: 'form_arith' = this form's OWN arithmetic-context mean "
@@ -63,6 +65,10 @@ def parse_args():
     p.add_argument("--baseline-crossfit", default="source_value", choices=["source_value", "none"],
                    help="cross-fit the ablation baseline so a case never contributes to its own target "
                         "(audit r4 #8): 'source_value' = leave-one-source-value-out")
+    p.add_argument("--layer-manifest", default=None,
+                   help="frozen layers.json from scripts/select_layers.py (REQUIRED in --production)")
+    p.add_argument("--production", action="store_true", default=False,
+                   help="production mode: require a frozen layer manifest + clean worktree")
     p.add_argument("--allow-dirty", action="store_true", default=True)
     p.add_argument("--no-allow-dirty", dest="allow_dirty", action="store_false")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
@@ -115,6 +121,9 @@ def intervention_positions(idxs, mode, seq_len):
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    layer, layer_prov = resolve_layer(args.model, args.layer, args.layer_manifest,
+                                      schema_version=C.SCHEMA_VERSION, production=args.production)
+    args.layer = layer
     hook_layer = args.layer - 1
 
     print(f"\nModel: {args.model} | layer {args.layer} | intervention-pos {args.intervention_pos}")
@@ -151,8 +160,14 @@ def main():
     for b in args.addends:
         vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
         ic_cases += [(a, ap, b) for a in vals for ap in vals if a != ap]
-    rng.shuffle(ic_cases)
-    ic_cases = ic_cases[: args.pairs_per_form]
+    all_ic = list(ic_cases)
+    if args.pairs_per_form and args.pairs_per_form > 0:
+        rng.shuffle(ic_cases)
+        ic_cases = ic_cases[: args.pairs_per_form]
+    else:
+        ic_cases = sorted(all_ic)
+    case_set_hash = hashlib.sha256(repr((sorted(ab_cases), sorted(ic_cases))).encode()).hexdigest()[:16]
+    print(f"cases: ablation {len(ab_cases)}, interchange {len(ic_cases)}/{len(all_ic)} | hash {case_set_hash}")
 
     # en_digit ARITHMETIC activations for the DELTA interchange (audit r3 #2): the sufficiency check
     # now transports a matched-arithmetic value displacement h_en(a',b)-h_en(a,b), NOT an absolute
@@ -385,6 +400,7 @@ def main():
            "model_revision": model_revision(model, args.model), "layer": args.layer,
            # positions are recorded SEPARATELY: the ablation honors --intervention-pos, the delta
            # interchange always injects at the source's last token (audit r4 #9)
+           "layer_selection": layer_prov,
            "ablation_position": args.intervention_pos, "interchange_position": "source_last_token",
            "interchange_estimand": "matched_arithmetic_delta",
            "r": r, "n_seeds": args.n_seeds, "ablation_baseline": args.ablation_baseline,
@@ -392,6 +408,7 @@ def main():
            "on_baseline_fallback": args.on_baseline_fallback,
            "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
            "value_sets_disjoint": set(range(args.fit_min, args.fit_max + 1)).isdisjoint(range(0, args.max_sum + 1)),
+           "case_set_hash": case_set_hash, "case_set_exhaustive": len(ic_cases) == len(all_ic),
            "controls_norm_matched": True, "hook_rel_error": hook_err,
            "readout": "restricted_digit_choice_accuracy (argmax over 0..9, single-digit sums)",
            "fit_r2": fit["r2"], "ablation": ablation, "interchange": interchange}

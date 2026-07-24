@@ -1,112 +1,135 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Overnight significance run: for every BASE (causal) model, collect the
-# per-case data the three causal legs now log, then bootstrap CIs + paired
-# significance tests over all of it. Designed to run unattended and survive a
-# single model failing (gated/OOM) without killing the night.
+# MANIFEST-DRIVEN production runner (audit r6 blocker #3).
 #
-#   legs per model:  transport (sufficiency)  |  necessity span (necessity +
-#                    matched-source interchange)  |  ablation-layer sweep
-#                    (held-out necessity Δ with its own bootstrap CI)
-#   at the end:      scripts/analyze_stats.py -> experiments/stats_summary.json
-#                    + stats_forest.png + a printed table with 95% CIs and p.
-#
-# HF cache is cleared PER MODEL (disk was the bottleneck: 250 GB fills fast).
-# Instruct-only families (Aya) and the least-tested gated multimodal path
-# (Gemma-4) are omitted here -- add them by hand once verified.
+# The old version wrote into a shared experiments/ directory with hard-coded layers and then analyzed
+# every admissible file it found -- so a stale JSON could silently stand in for a failed current job.
+# This version:
+#   1. requires a clean worktree and creates an ISOLATED run directory;
+#   2. FREEZES layers with the independent protocol (scripts/select_layers.py);
+#   3. writes a manifest enumerating the exact expected cells BEFORE running;
+#   4. records success/failure for every job;
+#   5. analyzes ONLY that directory, with --production (which rejects incomplete/mixed/stale runs).
+# Exploratory sweeps are NOT part of the production job (set RUN_SWEEPS=1 to add them separately).
 #
 # Usage:
-#   bash scripts/run_overnight.sh                 # full set, experiments/
-#   OUT_DIR=exp_night2 bash scripts/run_overnight.sh
-#   MODELS="Qwen/Qwen2.5-7B ibm-granite/granite-4.0-h-tiny-base" bash scripts/run_overnight.sh
+#   RUN_ID=pilot01 MODELS="Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407" bash scripts/run_overnight.sh
+#   RUN_ID=smoke   MODELS="Qwen/Qwen2.5-1.5B" PAIRS=0 ALLOW_DIRTY=1 bash scripts/run_overnight.sh
 # ============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-# Python interpreter: honor $PY, else the project venv, else system python3.
 if [[ -z "${PY:-}" ]]; then
   if [[ -x .venv/bin/python ]]; then PY=.venv/bin/python; else PY=python3; fi
 fi
-OUT_DIR="${OUT_DIR:-experiments}"
-PAIRS="${PAIRS:-120}"          # transport / interchange cases per form (tighter CIs)
-NSEEDS="${NSEEDS:-10}"         # necessity control-null seeds
-SWEEP_SEEDS="${SWEEP_SEEDS:-5}"
-STRIDE="${STRIDE:-2}"          # ablation-sweep layer stride (1 = every layer, slower)
-CLEAN_CACHE="${CLEAN_CACHE:-1}"  # 0 to keep HF cache between models
-mkdir -p "$OUT_DIR"
+RUN_ID="${RUN_ID:-run$(date +%Y%m%d_%H%M%S)}"
+ROOT="${ROOT:-experiments}"
+MODELS="${MODELS:-Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407}"
+FORMS="${FORMS:-en_digit devanagari_digit arabic_indic_digit es_word fr_word}"
+POSITIONS="${POSITIONS:-last span after}"   # audit r6 #9: necessity at all three positions
+NSEEDS="${NSEEDS:-10}"
+CTRL_SEEDS="${CTRL_SEEDS:-8}"
+PAIRS="${PAIRS:-0}"                          # 0 => ALL valid triples (audit r6 #8)
+ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
+RUN_SWEEPS="${RUN_SWEEPS:-0}"
+CLEAN_CACHE="${CLEAN_CACHE:-1}"
 
-# model : causal-leg layer (from the representational sharing peak; see progress.md H2 table).
-# Format "org/name=LAYER". Edit LAYER if a fresh fit-and-align moves the peak.
-MODEL_LAYERS_DEFAULT=(
-  "Qwen/Qwen2.5-7B=14"
-  "mistralai/Mistral-Nemo-Base-2407=22"
-  "Qwen/Qwen3-8B-Base=18"
-  "Qwen/Qwen3-14B-Base=20"
-  "allenai/Olmo-3-1025-7B=16"
-  "utter-project/EuroLLM-9B-2512=24"
-  "ibm-granite/granite-4.0-h-tiny-base=20"
-  "tiiuae/Falcon-H1-7B-Base=20"
-  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-Base=24"
-)
-# Olmo is English-only: script+notation forms only (no foreign number-words).
-declare -A FORMS_OVERRIDE=(
-  ["allenai/Olmo-3-1025-7B"]="en_digit devanagari_digit arabic_indic_digit fullwidth_digit en_word"
-)
-DEFAULT_FORMS="en_digit devanagari_digit arabic_indic_digit es_word fr_word"
+DIRTY_FLAGS=(--no-allow-dirty); NEWRUN_FLAGS=()
+if [[ "$ALLOW_DIRTY" == "1" ]]; then DIRTY_FLAGS=(--allow-dirty); NEWRUN_FLAGS=(--allow-dirty); fi
 
-# Optional MODELS="id1 id2" filter (matched against the ids above).
-FILTER="${MODELS:-}"
+# ---------------------------------------------------------------- 1. isolated run dir + manifest
+RUN_DIR="$("$PY" scripts/new_run.py --run-id "$RUN_ID" --root "$ROOT" \
+            --models $MODELS --forms $FORMS "${NEWRUN_FLAGS[@]}" \
+            | sed -n 's/^Run directory: //p')"
+if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
+  echo "FATAL: could not create the run directory (dirty worktree? see scripts/new_run.py)"; exit 1
+fi
+mkdir -p "$RUN_DIR/logs"
+LOG="$RUN_DIR/logs/run.log"
+echo "=== production run $RUN_ID -> $RUN_DIR ($(date)) ===" | tee "$LOG"
 
-hf_cache_dir() {  # org/name -> ~/.cache/huggingface/hub/models--org--name
-  echo "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${1//\//--}"
+# ---------------------------------------------------------------- 2. freeze layers (independent)
+LAYERS="$RUN_DIR/layers.json"
+echo ">> freezing layers via the independent protocol" | tee -a "$LOG"
+if ! "$PY" scripts/select_layers.py --models $MODELS --out "$LAYERS" \
+      $([[ "$ALLOW_DIRTY" == "1" ]] && echo --allow-dirty) 2>&1 | tee -a "$LOG"; then
+  echo "FATAL: layer discovery failed -- refusing to run causal jobs on unfrozen layers" | tee -a "$LOG"
+  exit 1
+fi
+
+# ---------------------------------------------------------------- 3. register + run every job
+"$PY" - "$RUN_DIR" $MODELS <<'PYCELLS' 2>&1 | tee -a "$LOG"
+import json, sys, os
+run_dir, models = sys.argv[1], sys.argv[2:]
+sys.path.insert(0, os.getcwd())
+import config as C
+from src.provenance import E_DELTA, E_ABLATION
+man = json.load(open(os.path.join(run_dir, "manifest.json")))
+cells, positions = [], os.environ.get("POSITIONS", "last span after").split()
+for m in models:
+    cells.append({"experiment_type": "transport", "model": m, "estimand": E_DELTA})
+    for p in positions:
+        cells.append({"experiment_type": "necessity", "model": m, "estimand": E_ABLATION,
+                      "ablation_position": p})
+man["expected_cells"] = cells
+man["primary_hypothesis_families"] = C.PRIMARY_FAMILIES
+man["secondary_families"] = C.SECONDARY_FAMILIES
+man["required_fallback_count"] = 0
+json.dump(man, open(os.path.join(run_dir, "manifest.json"), "w"), indent=2)
+print(f"manifest: {len(cells)} expected cells; primary families {C.PRIMARY_FAMILIES}")
+PYCELLS
+
+record() {  # record(job_id, status, detail)
+  "$PY" -c "import sys,os; sys.path.insert(0,os.getcwd());
+from src.provenance import record_completion; record_completion(*sys.argv[1:])" "$RUN_DIR" "$1" "$2" "$3"
 }
 
-LOG="$OUT_DIR/overnight_$(date +%Y%m%d_%H%M%S).log"
-echo "Logging to $LOG"
-echo "=== overnight run start: $(date) | OUT_DIR=$OUT_DIR PAIRS=$PAIRS NSEEDS=$NSEEDS ===" | tee "$LOG"
+PAIRS_FLAG=(); [[ "$PAIRS" != "0" ]] && PAIRS_FLAG=(--pairs-per-form "$PAIRS")
 
-for entry in "${MODEL_LAYERS_DEFAULT[@]}"; do
-  MODEL="${entry%%=*}"; LAYER="${entry##*=}"
-  if [[ -n "$FILTER" && " $FILTER " != *" $MODEL "* ]]; then continue; fi
-  FORMS="${FORMS_OVERRIDE[$MODEL]:-$DEFAULT_FORMS}"
-  echo "" | tee -a "$LOG"
-  echo "################################################################" | tee -a "$LOG"
-  echo "## $MODEL  @ L$LAYER  ($(date +%H:%M:%S))" | tee -a "$LOG"
-  echo "##   forms: $FORMS" | tee -a "$LOG"
-  echo "################################################################" | tee -a "$LOG"
+for MODEL in $MODELS; do
+  echo "" | tee -a "$LOG"; echo "#### $MODEL ($(date +%H:%M:%S))" | tee -a "$LOG"
 
-  # --- (1) SUFFICIENCY: cross-form transport ---
   echo ">> transport" | tee -a "$LOG"
-  "$PY" scripts/run_transport.py --model "$MODEL" --layer "$LAYER" \
-    --forms $FORMS --pairs-per-form "$PAIRS" --out-dir "$OUT_DIR" 2>&1 | tee -a "$LOG"
-
-  # --- (2) NECESSITY (whole-span) + matched-source interchange ---
-  echo ">> necessity (span)" | tee -a "$LOG"
-  "$PY" scripts/run_necessity.py --model "$MODEL" --layer "$LAYER" --intervention-pos span \
-    --forms $FORMS --pairs-per-form "$PAIRS" --n-seeds "$NSEEDS" --out-dir "$OUT_DIR" 2>&1 | tee -a "$LOG"
-
-  # --- (3) NECESSITY layer sweep (held-out Δ with bootstrap CI) ---
-  echo ">> ablation sweep" | tee -a "$LOG"
-  "$PY" scripts/run_ablation_sweep.py --model "$MODEL" \
-    --forms $FORMS --layer-stride "$STRIDE" --n-seeds "$SWEEP_SEEDS" --out-dir "$OUT_DIR" 2>&1 | tee -a "$LOG"
-
-  # --- free the disk before the next model ---
-  if [[ "$CLEAN_CACHE" == "1" ]]; then
-    CACHE="$(hf_cache_dir "$MODEL")"
-    if [[ -d "$CACHE" ]]; then
-      echo ">> clearing HF cache: $CACHE" | tee -a "$LOG"
-      rm -rf "$CACHE"
-    fi
+  if "$PY" scripts/run_transport.py --model "$MODEL" --layer-manifest "$LAYERS" \
+        --forms $FORMS "${PAIRS_FLAG[@]}" --delta-ctrl-seeds "$CTRL_SEEDS" \
+        --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]}" 2>&1 | tee -a "$LOG"; then
+    record "transport:$MODEL" ok ""
+  else
+    record "transport:$MODEL" failed "see logs/run.log"; echo "!! transport FAILED for $MODEL" | tee -a "$LOG"
   fi
-  echo "## done $MODEL ($(date +%H:%M:%S))" | tee -a "$LOG"
+
+  for POS in $POSITIONS; do          # audit r6 #9: last / span / after
+    echo ">> necessity ($POS)" | tee -a "$LOG"
+    if "$PY" scripts/run_necessity.py --model "$MODEL" --layer-manifest "$LAYERS" \
+          --intervention-pos "$POS" --forms $FORMS "${PAIRS_FLAG[@]}" --n-seeds "$NSEEDS" \
+          --on-baseline-fallback error --out-dir "$RUN_DIR" "${DIRTY_FLAGS[@]}" 2>&1 | tee -a "$LOG"; then
+      record "necessity:$MODEL:$POS" ok ""
+    else
+      record "necessity:$MODEL:$POS" failed "see logs/run.log"
+      echo "!! necessity($POS) FAILED for $MODEL" | tee -a "$LOG"
+    fi
+  done
+
+  if [[ "$RUN_SWEEPS" == "1" ]]; then     # EXPLORATORY -- never part of the default production job
+    "$PY" scripts/run_ablation_sweep.py --model "$MODEL" --forms $FORMS \
+      --out-dir "$RUN_DIR" 2>&1 | tee -a "$LOG"
+  fi
+
+  if [[ "$CLEAN_CACHE" == "1" ]]; then
+    CACHE="${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${MODEL//\//--}"
+    [[ -d "$CACHE" ]] && { echo ">> clearing $CACHE" | tee -a "$LOG"; rm -rf "$CACHE"; }
+  fi
 done
 
-# ---------------------------------------------------------------------------
-# Aggregate: bootstrap 95% CIs + paired significance across everything we ran.
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------- 4. production analysis
 echo "" | tee -a "$LOG"
-echo "=== analyze_stats (B=20000) ===" | tee -a "$LOG"
-"$PY" scripts/analyze_stats.py --out-dir "$OUT_DIR" --b 20000 2>&1 | tee -a "$LOG"
-
-echo "=== overnight run done: $(date) ===" | tee -a "$LOG"
-echo "Results in $OUT_DIR/  (stats_summary.json, stats_forest.png, per-model *_L*.json)"
+echo "=== production analysis (rejects incomplete / mixed / stale runs) ===" | tee -a "$LOG"
+"$PY" scripts/analyze_stats.py --out-dir "$RUN_DIR" --production --b 20000 2>&1 | tee -a "$LOG"
+STATUS=$?
+echo "" | tee -a "$LOG"
+if [[ $STATUS -eq 0 ]]; then
+  echo "=== RUN COMPLETE: $RUN_DIR ($(date)) ===" | tee -a "$LOG"
+else
+  echo "=== RUN REJECTED by production analysis -- see the message above ===" | tee -a "$LOG"
+fi
+exit $STATUS

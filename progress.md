@@ -743,10 +743,41 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
 - **Tests 30 → 35**, covering held-out-vs-in-sample layer selection, crossed-vs-nested CI width,
   build_cell alignment under reordering/NaN, run-directory rejection (mixed commit / duplicate /
   missing model / no manifest), and off-manifold control flagging.
-- ☐ **Open (need new data / decisions):** carrier-language factorial (#16); post-span & joint-span
-  necessity comparison (pilot requirement); continuation-likelihood / word-form readouts;
-  coordinate-level bootstrap CIs + no-rotation cross-prediction (#12); downstream-**sensitivity**-matched
-  controls (norm matching is not sensitivity matching).
+**Round 6 (production-readiness audit) — all 7 blockers closed; schema 2.3:**
+- ✅ **B1 Independent selection actually wired in.** `run_fit_and_align` and `run_structure` now call
+  `select_layer_independent` on a disjoint discovery split (en_digit only, held-out R²) and record the
+  full `layer_selection` provenance. The old mean-in-sample-R²-across-all-forms scan is deleted.
+- ✅ **B2 Admitted controls drive the primary result.** Admissibility is decided at the **global seed**
+  level (`admit_global_seeds`); the point estimate, clustered CI, cluster permutation p and FDR are all
+  recomputed from admitted seeds. **Row-mean imputation removed** — whole seeds are dropped, and a cell
+  hard-fails when fewer than `--min-admitted-seeds` survive.
+- ✅ **B3 Production runner rewritten.** `run_overnight.sh` is manifest-driven: clean-worktree check →
+  isolated run dir → frozen layers → expected-cell manifest → per-job completion records →
+  `analyze_stats --production`. Exploratory sweeps are out of the default job (`RUN_SWEEPS=1`).
+- ✅ **B4 Full cell identity + complete validation.** `result_cell_id` includes estimand, layer,
+  pooling and both positions, so necessity last/span/after are three cells. The validator enforces
+  schema, single commit, clean worktree, exact expected-cell set, no duplicates, no unexpected files,
+  expected forms, job completion, model revision, no legacy/exploratory rows, and zero baseline fallbacks.
+- ✅ **B5 Interchange demoted.** Its null is Haar-only with no energy-matched bank or α diagnostics, so
+  it is `exploratory` and out of `DEFAULT_CLAIMS`; `--include-interchange` admits it explicitly.
+- ✅ **B6 Zero-fallback baselines in production.** The runner passes `--on-baseline-fallback error` and
+  the validator rejects any file with skipped cases or a used fallback.
+- ✅ **B7 Frozen layer manifest.** `scripts/select_layers.py` writes a commit-stamped `layers.json`;
+  `resolve_layer` verifies schema/protocol/commit and **refuses a hand-typed `--layer` in production**.
+- ✅ **#8** `PAIRS=0` → all valid triples with a deterministic `case_set_hash`; ✅ **#9** the runner
+  sweeps `last span after` by default; ✅ **#11** primary/secondary families preregistered in
+  `config.py` and copied into the manifest before the run.
+- **Tests 35 → 43**, including: geometry scripts actually call the independent selector; admitted
+  seeds change the point estimate; no `nanmean` imputation remains; positions are distinct cells;
+  manifests reject missing/duplicate/unexpected cells and baseline skips; interchange is not a default
+  claim; production refuses a CLI layer; the runner is manifest-driven.
+- **Gate B verified live:** isolated dir, frozen layer (L2 from 28 candidates, held-out R²=0.567),
+  3/3 jobs `ok`, zero baseline fallbacks, `RUN VALIDATED`; an injected stale file → *"unexpected result
+  cell not in manifest"*; a failed job → *"jobs not completed successfully"*.
+- ☐ **Open (need new data / decisions):** carrier-language factorial (#13); joint-span necessity;
+  continuation-likelihood / word-form readouts; coordinate-level bootstrap CIs + no-rotation
+  cross-prediction (#12); downstream-**sensitivity**-matched controls (norm matching is not
+  sensitivity matching); cluster sensitivity beyond source value (#10, flag exists — needs reporting).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,

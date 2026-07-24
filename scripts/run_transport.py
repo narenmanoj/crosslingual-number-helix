@@ -26,6 +26,8 @@ import json
 import os
 import sys
 
+import hashlib
+
 import numpy as np
 import torch
 
@@ -41,7 +43,7 @@ from src.patching import (
     shuffled_fourier_basis, make_patched_vector, patch_residual, assert_hook_equivalence,
     subspace_delta, norm_match, norm_match_diag, energy_matched_bank, ALPHA_LO, ALPHA_HI,
 )
-from src.provenance import stamp, VALIDATED, LEGACY, E_DELTA, E_ABSOLUTE
+from src.provenance import stamp, resolve_layer, VALIDATED, LEGACY, E_DELTA, E_ABSOLUTE
 
 # LEGACY absolute-target modes (estimand = absolute_carrier_reconstruction). These replace the
 # subspace component with a reconstruction fitted on a *carrier* prompt, so they move value TOGETHER
@@ -65,10 +67,10 @@ def parse_args():
     p.add_argument("--model", default=C.MODEL)
     p.add_argument("--forms", nargs="+", default=["en_digit", "es_word", "fr_word", "devanagari_digit"],
                    help="source forms to transport FROM (en_digit = within-form positive control)")
-    p.add_argument("--layer", type=int, default=14, help="hidden_states index to fit + patch (7B~14, 1.5B~12)")
+    p.add_argument("--layer", type=int, default=None, help="hidden_states index to fit + patch (7B~14, 1.5B~12)")
     p.add_argument("--addends", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--max-sum", type=int, default=9, help="keep answers single-token")
-    p.add_argument("--pairs-per-form", type=int, default=80, help="raise for tighter CIs (cap ~all valid triples)")
+    p.add_argument("--pairs-per-form", type=int, default=80, help="0 = ALL valid triples (recommended for production); >0 samples that many")
     # DISJOINT value sets (audit r5 blocker #2): Q is fitted on fit_min..fit_max (default 10..99) while
     # the causal test uses 0..max_sum (default 0..9) -- so the intervention subspace never saw the exact
     # values it is tested on. Pass --fit-min 0 to reproduce the older overlapping-fit behaviour.
@@ -88,6 +90,10 @@ def parse_args():
     p.add_argument("--include-legacy-absolute-patching", dest="legacy_absolute", action="store_true",
                    default=False, help="ALSO run the legacy absolute-target modes (full/subspace/random) "
                                        "as a labelled legacy_diagnostic -- off by default (audit r4 #2)")
+    p.add_argument("--layer-manifest", default=None,
+                   help="frozen layers.json from scripts/select_layers.py (REQUIRED in --production)")
+    p.add_argument("--production", action="store_true", default=False,
+                   help="production mode: require a frozen layer manifest + clean worktree")
     p.add_argument("--allow-dirty", action="store_true", default=True,
                    help="allow writing results from a dirty/unknown worktree (set false for production)")
     p.add_argument("--no-allow-dirty", dest="allow_dirty", action="store_false")
@@ -113,7 +119,11 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    print(f"\nModel: {args.model} | layer(hidden_states): {args.layer}")
+    # BLOCKER 7: in production the layer must come from a frozen, current-commit layer manifest
+    layer, layer_prov = resolve_layer(args.model, args.layer, args.layer_manifest,
+                                      schema_version=C.SCHEMA_VERSION, production=args.production)
+    args.layer = layer
+    print(f"\nModel: {args.model} | layer(hidden_states): {args.layer} [{layer_prov['layer_source']}]")
     model, tok, device = load_model(args.model, args.device)
     d_model = model.config.hidden_size
     if args.layer < 1:
@@ -181,8 +191,15 @@ def main():
         vals = [a for a in range(0, args.max_sum + 1) if a + b <= args.max_sum]
         pairs = [(a, ap) for a in vals for ap in vals if a != ap]
         cases += [(a, ap, b) for (a, ap) in pairs]
-    rng.shuffle(cases)
-    cases = cases[: args.pairs_per_form]
+    all_cases = list(cases)
+    if args.pairs_per_form and args.pairs_per_form > 0:
+        rng.shuffle(cases)
+        cases = cases[: args.pairs_per_form]
+    else:                       # 0 => EXHAUSTIVE: every valid (a, a', b), no sampling variance (r6 #8)
+        cases = sorted(all_cases)
+    case_set_hash = hashlib.sha256(repr(sorted(cases)).encode()).hexdigest()[:16]
+    print(f"cases: {len(cases)} of {len(all_cases)} valid triples "
+          f"({'exhaustive' if len(cases) == len(all_cases) else 'sampled'}) | hash {case_set_hash}")
 
     # --- delta transport cache: en_digit ARITHMETIC activation h_en(v,b) for every (v,b) we need ---
     FAM2MODE = {"haar": "delta_rand", "pca_span": "delta_pca_span", "shuf_fourier": "delta_shuf_fourier"}
@@ -349,6 +366,7 @@ def main():
            "legacy_absolute_included": args.legacy_absolute,
            "legacy_absolute_estimand": E_ABSOLUTE if args.legacy_absolute else None,
            "intervention_position": "source_last_token",
+           "layer_selection": layer_prov,
            "delta_control_families": DELTA_FAMILIES,
            "control_bank_selection": bank_reports,
            "energy_matched_controls": args.energy_matched_controls,
@@ -357,7 +375,9 @@ def main():
            "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
            "delta_ctrl_seeds": args.delta_ctrl_seeds,
            "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
-           "value_sets_disjoint": disjoint, "results": results}
+           "value_sets_disjoint": disjoint,
+           "case_set_hash": case_set_hash, "case_set_exhaustive": len(cases) == len(all_cases),
+           "results": results}
     tag = args.model.split("/")[-1]
     path = os.path.join(args.out_dir, f"transport_{tag}_L{args.layer}.json")
     with open(path, "w") as fh:

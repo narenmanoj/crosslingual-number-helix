@@ -13,6 +13,7 @@ Vocabulary
 """
 from __future__ import annotations
 
+import os
 import subprocess
 
 VALIDATED = "validated"
@@ -109,9 +110,80 @@ def new_run_dir(root: str, run_id: str) -> str:
     return path
 
 
+def resolve_layer(model: str, layer_arg, manifest_path: str = None, schema_version: str = None,
+                  production: bool = False) -> tuple:
+    """Resolve the causal layer, preferring a FROZEN layer manifest (audit r6 blocker #7).
+
+    In production a hand-typed --layer is refused: the layer must come from a manifest produced by
+    scripts/select_layers.py at THIS commit, using the approved independent protocol. Returns
+    (layer, provenance-dict)."""
+    import json
+    if manifest_path:
+        man = json.load(open(manifest_path))
+        if schema_version and man.get("schema_version") != schema_version:
+            raise ValueError(f"{manifest_path}: schema {man.get('schema_version')} != {schema_version}")
+        if man.get("selection_protocol") != "en_digit_heldout_r2":
+            raise ValueError(f"{manifest_path}: unapproved selection protocol {man.get('selection_protocol')!r}")
+        if production:
+            g = git_metadata()
+            if man.get("dirty_worktree"):
+                raise ValueError(f"{manifest_path}: layers were frozen from a dirty worktree")
+            if g["code_commit"] and man.get("code_commit") != g["code_commit"]:
+                raise ValueError(f"{manifest_path}: frozen at commit {man.get('code_commit')}, "
+                                 f"running at {g['code_commit']} -- re-freeze layers for this build")
+        entry = (man.get("models") or {}).get(model)
+        if entry is None:
+            raise ValueError(f"{manifest_path}: no frozen layer for {model!r}")
+        return int(entry["selected_layer"]), {
+            "layer_source": "frozen_manifest", "layer_manifest": os.path.basename(manifest_path),
+            "selection_protocol": man.get("selection_protocol"),
+            "discovery_numbers": man.get("discovery_numbers"),
+            "evaluation_numbers": man.get("evaluation_numbers"),
+            "selection_frozen_before_crossform_evaluation": True,
+            "manifest_commit": man.get("code_commit")}
+    if production:
+        raise ValueError("production runs require --layer-manifest (hand-picked layers are not "
+                         "reproducible; generate one with scripts/select_layers.py)")
+    if layer_arg is None:
+        raise ValueError("no --layer and no --layer-manifest given")
+    return int(layer_arg), {"layer_source": "cli_argument",
+                            "selection_frozen_before_crossform_evaluation": False}
+
+
+def result_cell_id(d: dict) -> tuple:
+    """FULL identity of a result cell (audit r6 blocker #4).
+
+    (experiment_type, model) is too coarse: necessity at last/span/after for one model are three
+    legitimate cells, not duplicates. Position and estimand are part of the identity."""
+    return (d.get("experiment_type"),
+            d.get("model") or (d.get("model_revision") or {}).get("name"),
+            d.get("estimand"),
+            d.get("layer"),
+            d.get("pooling"),
+            d.get("ablation_position"),
+            d.get("interchange_position"))
+
+
+def cell_matches(expected: dict, cell: tuple) -> bool:
+    """An expected-cell spec matches an observed cell on the keys it actually specifies."""
+    fields = ["experiment_type", "model", "estimand", "layer", "pooling",
+              "ablation_position", "interchange_position"]
+    for i, f in enumerate(fields):
+        if f in expected and expected[f] is not None and expected[f] != cell[i]:
+            return False
+    return True
+
+
 def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_models: list,
-                   expected_experiments: list, expected_forms: list, allow_dirty: bool = False) -> dict:
-    """Declare up-front what this run MUST produce, so a partial run cannot be silently analyzed."""
+                   expected_experiments: list, expected_forms: list, expected_cells: list = None,
+                   primary_families: list = None, secondary_families: list = None,
+                   baseline_policy: str = "disjoint_calibration", required_fallback_count: int = 0,
+                   allow_dirty: bool = False) -> dict:
+    """Declare up-front what this run MUST produce, so a partial run cannot be silently analyzed.
+
+    `expected_cells` enumerates the EXACT cells (including intervention positions) the run must emit;
+    `primary_families` / `secondary_families` preregister the multiple-testing families (audit r6 #11);
+    `required_fallback_count` pins the baseline policy (audit r6 #6)."""
     import json
     import os
     g = git_metadata()
@@ -122,18 +194,37 @@ def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_m
            "expected_models": list(expected_models),
            "expected_experiments": list(expected_experiments),
            "expected_forms": list(expected_forms),
+           "expected_cells": list(expected_cells or []),
+           "primary_hypothesis_families": list(primary_families or []),
+           "secondary_families": list(secondary_families or []),
+           "global_fdr_sensitivity": True,
+           "baseline_policy": baseline_policy,
+           "required_fallback_count": required_fallback_count,
            "allow_dirty": allow_dirty, "completion": {}}
     with open(os.path.join(run_dir, "manifest.json"), "w") as fh:
         json.dump(man, fh, indent=2)
     return man
 
 
-def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = True) -> dict:
-    """Whole-directory admission check for a production analysis.
+def record_completion(run_dir: str, job_id: str, status: str, detail: str = "") -> None:
+    """Mark one expected job succeeded/failed so an incomplete run cannot masquerade as complete."""
+    import json
+    import os
+    mpath = os.path.join(run_dir, "manifest.json")
+    man = json.load(open(mpath))
+    man.setdefault("completion", {})[job_id] = {"status": status, "detail": detail}
+    with open(mpath, "w") as fh:
+        json.dump(man, fh, indent=2)
 
-    `results` is [(basename, parsed_json), ...]. Rejects: mixed code commits, dirty-worktree outputs,
-    duplicate (experiment, model) cells, and models/experiments the manifest expected but that are
-    missing. Returns the manifest (or {} when not required). Raises ValueError on any violation.
+
+def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = True,
+                     strict_cells: bool = True) -> dict:
+    """Whole-directory admission check for a production analysis (audit r6 blockers #3/#4/#6).
+
+    `results` is [(basename, parsed_json), ...]. Enforces: one code commit matching the manifest, a
+    clean worktree, exact schema, no duplicate FULL cells, every expected cell present, no unexpected
+    files, expected forms present inside each file, job completion, model revision recorded, no
+    legacy/exploratory estimand, and zero baseline fallbacks/skips. Raises ValueError on violation.
     """
     import json
     import os
@@ -145,30 +236,62 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
         return {}
     man = json.load(open(mpath))
 
-    commits, dirty, cells = set(), [], {}
+    commits, dirty, cells, problems = set(), [], {}, []
     for name, d in results:
-        c = d.get("code_commit")
-        commits.add(c)
+        commits.add(d.get("code_commit"))
         if d.get("dirty_worktree"):
             dirty.append(name)
-        key = (d.get("experiment_type"), d.get("model") or d.get("model_revision", {}).get("name"))
-        cells.setdefault(key, []).append(name)
+        cells.setdefault(result_cell_id(d), []).append(name)
+        if d.get("schema_version") != man.get("schema_version"):
+            problems.append(f"{name}: schema {d.get('schema_version')} != manifest {man.get('schema_version')}")
+        if d.get("analysis_status") not in (None, VALIDATED):
+            problems.append(f"{name}: {d.get('analysis_status')} result in a validated production report")
+        if not d.get("model_revision"):
+            problems.append(f"{name}: no model_revision recorded")
+        # zero-fallback baseline policy (blocker #6)
+        for form, A in (d.get("ablation") or {}).items():
+            if A.get("n_skipped_no_baseline"):
+                problems.append(f"{name}[{form}]: {A['n_skipped_no_baseline']} case(s) skipped for want of a baseline")
+            for pm in (A.get("baseline_meta") or []):
+                if any(v.get("fallback_used") for v in pm.values()):
+                    problems.append(f"{name}[{form}]: baseline fallback used")
+                    break
+        # expected forms present
+        want_forms = set(man.get("expected_forms") or [])
+        if want_forms:
+            got = set((d.get("results") or d.get("ablation") or {}).keys())
+            if got and not want_forms.issubset(got):
+                problems.append(f"{name}: missing expected forms {sorted(want_forms - got)}")
 
     if len(commits) > 1:
-        raise ValueError(f"{run_dir}: results span MULTIPLE code commits {sorted(map(str, commits))} -- "
-                         "a report must come from one build")
+        problems.append(f"results span MULTIPLE code commits {sorted(map(str, commits))}")
     if man.get("code_commit") and commits and man["code_commit"] not in commits:
-        raise ValueError(f"{run_dir}: results commit {commits} != manifest commit {man['code_commit']}")
+        problems.append(f"results commit {commits} != manifest commit {man['code_commit']}")
     if dirty and not man.get("allow_dirty"):
-        raise ValueError(f"{run_dir}: dirty-worktree results present: {sorted(dirty)}")
-    dupes = {k: v for k, v in cells.items() if len(v) > 1}
+        problems.append(f"dirty-worktree results present: {sorted(dirty)}")
+    dupes = {str(k): v for k, v in cells.items() if len(v) > 1}
     if dupes:
-        raise ValueError(f"{run_dir}: duplicate (experiment, model) cells: {dupes}")
+        problems.append(f"duplicate cells: {dupes}")
 
-    seen_models = {m for (_, m) in cells if m}
-    missing = [m for m in man.get("expected_models", [])
-               if not any(m.endswith(s) or s.endswith(m) or m == s for s in seen_models)]
-    if missing:
-        raise ValueError(f"{run_dir}: manifest expected models with no results: {missing} "
-                         "(incomplete run -- do not report it)")
+    expected = man.get("expected_cells") or []
+    if expected and strict_cells:
+        observed = list(cells)
+        for spec in expected:
+            if not any(cell_matches(spec, c) for c in observed):
+                problems.append(f"expected cell missing: {spec}")
+        for c in observed:
+            if not any(cell_matches(spec, c) for spec in expected):
+                problems.append(f"unexpected result cell not in manifest: {c}")
+    elif not expected:
+        seen_models = {c[1] for c in cells if c[1]}
+        missing = [m for m in man.get("expected_models", []) if m not in seen_models]
+        if missing:
+            problems.append(f"manifest expected models with no results: {missing}")
+
+    incomplete = {k: v for k, v in (man.get("completion") or {}).items() if v.get("status") != "ok"}
+    if incomplete:
+        problems.append(f"jobs not completed successfully: {sorted(incomplete)}")
+
+    if problems:
+        raise ValueError(f"{run_dir}: " + "; ".join(problems))
     return man

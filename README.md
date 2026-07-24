@@ -107,30 +107,38 @@ python scripts/run_necessity.py --model $M --layer $L --intervention-pos span \
 python scripts/analyze_stats.py --out-dir experiments --b 20000
 ```
 
-### Production runs are isolated
+### Production runs (the only supported path for reportable numbers)
 
-A shared output directory lets a stale-but-compatible file from an earlier job slip into a report, or
-a partially-failed run be analyzed as if complete. Production runs therefore get their own directory
-and a manifest declaring what they must produce:
+Production is a single manifest-driven command. It refuses a dirty worktree, creates an isolated run
+directory, **freezes the causal layers** with the independent protocol, registers every expected
+cell, records per-job success/failure, and analyzes *only* that directory:
 
 ```bash
-python scripts/new_run.py --run-id pilot01 \
-    --models Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407
-# -> experiments/2026-07-23_<commit>_pilot01/   (refuses to open on a dirty worktree)
-
-OUT_DIR=experiments/2026-07-23_<commit>_pilot01 bash scripts/run_overnight.sh
-python scripts/analyze_stats.py --out-dir <that dir> --production
+RUN_ID=pilot01 MODELS="Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407" \
+    bash scripts/run_overnight.sh
 ```
 
-`--production` validates the directory as a whole: one code commit, no dirty-worktree results, no
-duplicate (experiment, model) cells, no manifest-expected model missing.
+```
+experiments/2026-07-23_<commit>_pilot01/
+  manifest.json     expected cells, preregistered families, baseline policy, per-job completion
+  layers.json       frozen layers + full per-layer held-out R² record
+  transport_*.json  necessity_*.json      logs/run.log
+```
 
-### All models, unattended
+The final `analyze_stats --production` **rejects the run** if anything is off: mixed commits, a dirty
+result, a duplicate or missing cell, a file not in the manifest, an unfinished job, a legacy or
+exploratory estimand, or any baseline fallback. A failed job therefore fails the *report* rather than
+being papered over by a stale file.
+
+Knobs: `MODELS`, `FORMS`, `POSITIONS` (default `last span after`), `PAIRS` (**0 = all valid triples**,
+the production default), `CTRL_SEEDS`, `NSEEDS`, `RUN_SWEEPS=1` to add exploratory sweeps,
+`ALLOW_DIRTY=1` for a scratch run.
+
+Layers can also be frozen on their own:
 
 ```bash
-bash scripts/run_overnight.sh                       # ~1.5 h for 9 models on one 5090
-OUT_DIR=exp_pilot MODELS="Qwen/Qwen2.5-7B mistralai/Mistral-Nemo-Base-2407" \
-    bash scripts/run_overnight.sh                   # recommended pilot first
+python scripts/select_layers.py --models Qwen/Qwen2.5-7B --out layers.json
+python scripts/run_transport.py --model Qwen/Qwen2.5-7B --layer-manifest layers.json --production
 ```
 
 Runs transport → necessity → ablation-sweep per model, clears the HF cache between models, and runs
@@ -171,9 +179,16 @@ The design decisions that make the causal result defensible, all enforced in cod
 - **The subspace never sees the values it is tested on.** Q is fitted on numbers 10–99 while the
   causal test uses 0–9, so "the intervention works" cannot be an artifact of fitting the exact test
   values. `value_sets_disjoint` is stamped in every result.
-- **Layer choice is frozen before looking.** `select_layer_independent` picks the layer from
-  **en_digit only**, on discovery values, scoring **held-out** R² — never from the cross-form
-  comparison it will later support.
+- **Layer choice is frozen before looking.** The layer is picked from **en_digit only**, on a
+  disjoint discovery split, scoring **held-out** R² — never from the cross-form comparison it will
+  later support. Production consumes a commit-stamped `layers.json`; a hand-typed `--layer` is
+  refused outright.
+- **Admissible controls decide the headline number.** Control-seed admissibility is a property of the
+  *global seed* (one seed = one subspace reused across all cases), so the primary point estimate, CI,
+  permutation p and FDR are all recomputed from the admitted seeds. Whole seeds are dropped — never
+  imputed — and a cell **fails** rather than reports if too few seeds survive.
+- **Multiple-testing families are preregistered** in `config.py` and copied into each run's manifest
+  before the run starts, so they cannot be chosen after seeing results.
 - **Fail-fast provenance.** Every result stamps schema / experiment type / estimand / analysis status
   / git commit / worktree state; every analysis validates them and **refuses** stale or mismatched
   files. Exploratory sweep results are excluded from the default statistics unless explicitly opted in.

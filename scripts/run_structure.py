@@ -34,7 +34,7 @@ import config as C
 from src import data as D
 from src.extract import (load_model, extract_form_activations, _number_token_indices, model_revision,
                          continuation_answer_ids)
-from src.helix import fit_helix
+from src.helix import fit_helix, select_layer_independent, discovery_evaluation_split
 from src.alignment import subspace_alignment, random_subspace_floor, subspace_overlap
 from src.provenance import stamp, admits, git_metadata, VALIDATED, EXPLORATORY, E_GEOMETRY, E_ABLATION
 
@@ -55,6 +55,8 @@ def parse_args():
     p.add_argument("--k-pca", type=int, default=C.K_PCA)
     p.add_argument("--device", default=C.DEVICE)
     p.add_argument("--out-dir", default=C.OUT_DIR)
+    p.add_argument("--discovery-frac", type=float, default=0.5,
+                   help="fraction of numbers reserved for layer discovery (disjoint from evaluation)")
     p.add_argument("--necessity-corr", action="store_true", default=False,
                    help="attach the EXPLORATORY geometry<->necessity correlation (audit r5 #13)")
     return p.parse_args()
@@ -93,18 +95,26 @@ def main():
         print(f"Extracting: {f}")
         acts[f] = extract_form_activations(model, tok, device, D.build_prompts(f, numbers), pooling=args.pooling)
 
-    # choose layer
+    # choose layer -- INDEPENDENT protocol: en_digit only, discovery values only, held-out R^2,
+    # frozen before any cross-form contrast is computed (audit r6 blocker #1). The old scan maximized
+    # mean IN-SAMPLE R^2 across ALL forms, letting the targets pick the layer that flattered them.
+    discovery, evaluation = discovery_evaluation_split(numbers, frac=args.discovery_frac, seed=0)
     if args.layer == "scan":
         cands = list(range(max(1, n_layers // 3), n_layers + 1))
-        best, bestr2 = cands[0], -1e9
-        for L in cands:
-            m = float(np.mean([fit_helix(acts[f][L], numbers, k_pca=args.k_pca)["r2"] for f in forms]))
-            if m > bestr2:
-                best, bestr2 = L, m
-        layer = best
-        print(f"\nChosen layer {layer} (mean R^2={bestr2:.3f})")
+        d_idx = [numbers.index(v) for v in discovery]
+        sel = select_layer_independent({L: acts["en_digit"][L][d_idx] for L in cands},
+                                       discovery, k_pca=args.k_pca, candidate_layers=cands)
+        layer = sel["selected_layer"]
+        layer_selection = {"method": "en_digit_heldout_r2", "discovery_numbers": discovery,
+                           "evaluation_numbers": evaluation, "candidate_layers": cands,
+                           "selected_layer": layer,
+                           "selection_frozen_before_crossform_evaluation": True,
+                           "per_layer": sel["per_layer"]}
+        print(f"\nChosen layer {layer} via INDEPENDENT protocol (en_digit, {len(discovery)} discovery values)")
     else:
         layer = int(args.layer)
+        layer_selection = {"method": "cli_argument", "selected_layer": layer,
+                           "selection_frozen_before_crossform_evaluation": False}
 
     fits = {f: fit_helix(acts[f][layer], numbers, k_pca=args.k_pca) for f in forms}
     floor = random_subspace_floor(fits[forms[0]]["helix_dirs_model"], d_model)
@@ -261,6 +271,7 @@ def main():
     out = {**stamp(C.SCHEMA_VERSION, "structure", estimand=E_GEOMETRY, analysis_status=VALIDATED),
            "model_revision": model_revision(model, args.model), "model": args.model, "layer": layer, "pooling": args.pooling, "floor": floor,
            "forms": forms, "pairwise_subspace_cos": M.tolist(), "form_ranks": form_ranks,
+           "layer_selection": layer_selection,
            # audit #8: this file is the AUTHORITATIVE H2 source. Its clean_contrasts use the correct
            # reference per axis; the everything-vs-en_digit axis_summary in align_*.json is confounded.
            "contrast_definition": {"script": "en_digit_vs_other_digit_scripts",

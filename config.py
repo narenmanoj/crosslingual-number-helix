@@ -9,7 +9,15 @@
 #   2.2 = post round-4 (ENFORCED schema/experiment_type/estimand/analysis_status, delta transport is
 #         the default estimand + legacy absolute patching opt-in, structured delta controls with
 #         per-seed retention, cross-fit ablation baseline, cluster-level permutation p, git provenance)
-SCHEMA_VERSION = "2.2"
+#   2.3 = post round-5/6 (independent layer selection wired in + frozen layer manifest, GLOBAL control
+#         -seed admissibility driving the primary estimate, exact-cell manifests, hardened interchange,
+#         zero-fallback production baselines, manifest-driven production runner, exhaustive case sets)
+SCHEMA_VERSION = "2.3"
+
+# PREREGISTERED multiple-testing families (audit r6 #11): declared here, in code, BEFORE any run --
+# never chosen after inspecting results. The production manifest records these verbatim.
+PRIMARY_FAMILIES = ["delta_vs_shuf_fourier", "necessity"]
+SECONDARY_FAMILIES = ["delta_vs_pca_span", "delta_transport", "interchange"]
 
 # Base models are cleaner for number geometry than chat-tuned ones. The causal legs need BASE
 # models (instruct models score ~0 clean_acc on "a + b = "); the representational legs (H2 +
