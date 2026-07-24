@@ -65,11 +65,14 @@ def main():
     for name in args.models:
         print(f"\n=== {name} ===")
         model, tok, device = load_model(name, args.device)
+        rev = getattr(model, '_pinned_revision', None)
         n_layers = model.config.num_hidden_layers
         # en_digit ONLY, discovery numbers ONLY -- nothing about other forms is visible here
         acts = extract_form_activations(model, tok, device,
                                         D.build_prompts("en_digit", discovery), pooling="last")
-        candidates = list(range(1, n_layers + 1))
+        # exclude the FINAL hidden state: for many HF models it is post-final-norm while the
+        # last-block hook is pre-norm, so it cannot be patched consistently (audit r8 non-blocking).
+        candidates = list(range(1, n_layers))
         sel = select_layer_independent({L: acts[L] for L in candidates}, discovery,
                                        k_pca=args.k_pca, candidate_layers=candidates)
         best = [d for d in sel["per_layer"] if d["layer"] == sel["selected_layer"]][0]
@@ -77,7 +80,7 @@ def main():
               f"from {len(candidates)} candidates")
         models[name] = {"selected_layer": sel["selected_layer"],
                         "heldout_r2": best["heldout_r2"],
-                        "model_revision": model_revision(model, name),
+                        "model_revision": model_revision(model, name, revision=rev),
                         "per_layer": sel["per_layer"]}
         del model
         try:

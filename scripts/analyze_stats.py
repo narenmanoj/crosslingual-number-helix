@@ -301,8 +301,11 @@ def parse_args():
                    help="admit the UNDERCONTROLLED delta-interchange claim (Haar-only null; audit r6 #5)")
     p.add_argument("--min-admitted-seeds", type=int, default=3,
                    help="fail a cell if fewer control seeds survive global admissibility (audit r6 #2)")
-    p.add_argument("--min-case-frac", type=float, default=0.8,
-                   help="a seed is admitted when alpha is in-band for >= this fraction of cases")
+    p.add_argument("--min-case-frac", type=float, default=1.0,
+                   help="a seed is admitted when alpha is in-band for >= this fraction of cases "
+                        "(1.0 = STRICT: every case admissible; audit r8 #9)")
+    p.add_argument("--primary-necessity-position", default=C.PRIMARY_NECESSITY_POSITION,
+                   help="the ONE necessity position that enters the primary FDR family (audit r8 #4)")
     p.add_argument("--clean-acc-threshold", type=float, default=0.8,
                    help="necessity eligibility: forms below this clean accuracy are not testable (r7 #9)")
     p.add_argument("--require-crossed", dest="require_crossed", action="store_true", default=True,
@@ -355,7 +358,11 @@ def main():
                           ("cluster_by", "cluster_by"),
                           ("bootstrap_B", "b"),
                           ("clean_accuracy_threshold", "clean_acc_threshold"),
-                          ("primary_requires_crossed_ci", "require_crossed")):
+                          ("primary_requires_crossed_ci", "require_crossed"),
+                          ("necessity_null", "null"),
+                          ("admissible_only", "admissible_only"),
+                          ("fdr_alpha", "alpha"),
+                          ("primary_necessity_position", "primary_necessity_position")):
             frozen, got = policy.get(key), getattr(args, attr)   # NB: not `want` -- that shadows want()
             if frozen is None:
                 continue
@@ -460,7 +467,8 @@ def main():
             if not ok_clean:
                 drop("necessity" + suffix, tag, form,
                      f"not_testable_due_to_clean_behavior (clean_acc={clean_acc:.2f} < "
-                     f"{args.clean_acc_threshold})", clean_acc=clean_acc, not_testable=True)
+                     f"{args.clean_acc_threshold})", clean_acc=clean_acc, not_testable=True,
+                     ablation_position=pos)
                 continue
             sm = pc.get("controls_by_seed", {}).get(args.null)
             adm = A.get("control_diagnostics", {}).get(args.null, {}).get("admissible")
@@ -473,7 +481,7 @@ def main():
                     if len(keep) < args.min_admitted_seeds:
                         drop("necessity" + suffix, tag, form,
                              f"only {len(keep)} admitted control seed(s) < required "
-                             f"{args.min_admitted_seeds}", n_admitted=len(keep))
+                             f"{args.min_admitted_seeds}", n_admitted=len(keep), ablation_position=pos)
                         continue
                     M = M[:, keep]                           # whole seeds only, no imputation
                 null_mean = M.mean(axis=1)                   # PRIMARY uses admitted controls (blocker #2)
@@ -482,7 +490,8 @@ def main():
             cell = build_cell(null_mean, pc["helix"], pc["keys"],
                               seed_matrix=sd, cluster_by=args.cluster_by)
             if cell is None:
-                drop("necessity" + suffix, tag, form, "fewer than 2 usable cases after keyed pairing")
+                drop("necessity" + suffix, tag, form, "fewer than 2 usable cases after keyed pairing",
+                     ablation_position=pos)
             else:
                 add_row(rows, "necessity" + suffix, tag, form, A.get("axis", axis_of(form)), cell, args.b,
                         require_crossed=args.require_crossed, extra={"ablation_position": pos, "seed_admission": seed_report, "clean_acc": clean_acc,
@@ -540,14 +549,30 @@ def main():
         return
 
     # ---------------- FDR over the DEFAULT family only (opt-in claims excluded) ----------------
-    # PREREGISTERED FAMILIES: each claim is its own BH family (they test different control families /
-    # different interventions). --global-fdr additionally reports one correction across all primary
-    # cells as a sensitivity analysis, since per-family correction is the more permissive choice (r5 #9).
-    default_rows = [r for r in rows if r["claim"].split("@")[0] in DEFAULT_CLAIMS]
-    for claim in {r["claim"] for r in default_rows}:
-        cr = [r for r in default_rows if r["claim"] == claim]
+    # PREREGISTERED FAMILIES. Each claim base is one BH family. For NECESSITY the three intervention
+    # positions are NOT three families (audit r8 #4): only `--primary-necessity-position` is primary
+    # and enters FDR; the others are secondary sensitivity rows (marked, never headline). Testing three
+    # and taking the best would inflate the family-wise error.
+    def is_primary(r):
+        base = r["claim"].split("@")[0]
+        if base != "necessity":
+            return base in DEFAULT_CLAIMS
+        return r.get("ablation_position") == args.primary_necessity_position
+    for r in rows:
+        r["family"] = "primary" if is_primary(r) else (
+            "secondary" if r["claim"].split("@")[0] in DEFAULT_CLAIMS else "optin")
+    default_rows = [r for r in rows if r["family"] == "primary"]
+    for claim in {r["claim"].split("@")[0] for r in default_rows}:
+        cr = [r for r in default_rows if r["claim"].split("@")[0] == claim]
         reject, q = bh_fdr([r["perm_p"] for r in cr], alpha=args.alpha)
         for r, rj, qq in zip(cr, reject, q):
+            r["q"], r["sig_fdr"] = float(qq), bool(rj)
+    # secondary necessity positions get their own JOINT BH correction (a sensitivity analysis, not a
+    # headline), so they are still reported honestly rather than silently uncorrected.
+    sec = [r for r in rows if r["family"] == "secondary" and r["claim"].split("@")[0] == "necessity"]
+    if sec:
+        rej_s, q_s = bh_fdr([r["perm_p"] for r in sec], alpha=args.alpha)
+        for r, rj, qq in zip(sec, rej_s, q_s):
             r["q"], r["sig_fdr"] = float(qq), bool(rj)
     if args.global_fdr and default_rows:
         rej_g, q_g = bh_fdr([r["perm_p"] for r in default_rows], alpha=args.alpha)
@@ -556,10 +581,12 @@ def main():
     for r in rows:                       # opt-in claims are reported but never FDR-corrected here
         r.setdefault("q", float("nan"))
         r.setdefault("sig_fdr", False)
-    # HEADLINE gate: FDR-significant AND the crossed (case x global-seed) interval excludes zero.
+    # HEADLINE gate: PRIMARY family, FDR-significant, AND the crossed interval excludes zero. A
+    # secondary-position necessity row can never be a headline positive.
     for r in rows:
         crossed_ok = r["sig_crossed"] if r.get("sig_crossed") is not None else r["sig_ci"]
-        r["headline"] = bool(r["sig_fdr"] and (crossed_ok if args.require_crossed else r["sig_ci"]))
+        r["headline"] = bool(r.get("family") == "primary" and r["sig_fdr"]
+                             and (crossed_ok if args.require_crossed else r["sig_ci"]))
 
     # ---------------- table ----------------
     def flag(b):
@@ -607,8 +634,17 @@ def main():
             print(f"  {mdl[:23]:<24}{cells}")
 
     # ---------------- BLOCKER 4: dropped primary cells invalidate a production run -------------
-    primary_prefixes = set(C.PRIMARY_FAMILIES)
-    dropped_primary = [d for d in dropped if d["claim"].split("@")[0] in primary_prefixes]
+    # A dropped cell is "primary" only if it WOULD have been in the primary family: a primary claim
+    # base, and for necessity the primary position. A preregistered-ineligible necessity form is not a
+    # failure -- it is recorded as not_testable and excluded from the denominator (audit r8 #2).
+    def dropped_is_primary(d):
+        base = d["claim"].split("@")[0]
+        if d.get("not_testable"):
+            return False
+        if base == "necessity":
+            return d.get("ablation_position") == args.primary_necessity_position
+        return base in C.PRIMARY_FAMILIES
+    dropped_primary = [d for d in dropped if dropped_is_primary(d)]
     if dropped:
         print(f"\nDROPPED CELLS ({len(dropped)}; {len(dropped_primary)} in a PRIMARY family):")
         for d in dropped:

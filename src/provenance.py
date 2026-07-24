@@ -140,6 +140,7 @@ def resolve_layer(model: str, layer_arg, manifest_path: str = None, schema_versi
             "discovery_numbers": man.get("discovery_numbers"),
             "evaluation_numbers": man.get("evaluation_numbers"),
             "selection_frozen_before_crossform_evaluation": True,
+            "frozen_model_revision": (entry.get("model_revision") or {}).get("revision"),  # r8 #7
             "manifest_commit": man.get("code_commit")}
     if production:
         raise ValueError("production runs require --layer-manifest (hand-picked layers are not "
@@ -164,30 +165,45 @@ def result_cell_id(d: dict) -> tuple:
             d.get("interchange_position"))
 
 
+CELL_FIELDS = ["experiment_type", "model", "estimand", "layer", "pooling",
+               "ablation_position", "interchange_position"]
+
+
 def cell_matches(expected: dict, cell: tuple) -> bool:
     """An expected-cell spec matches an observed cell on the keys it actually specifies."""
-    fields = ["experiment_type", "model", "estimand", "layer", "pooling",
-              "ablation_position", "interchange_position"]
-    for i, f in enumerate(fields):
+    for i, f in enumerate(CELL_FIELDS):
         if f in expected and expected[f] is not None and expected[f] != cell[i]:
             return False
     return True
 
 
+def model_commit(d: dict):
+    """The pinned model snapshot for a result file (audit r8 #7): the HF revision/commit, not the code
+    commit. None when unrecorded, which production treats as a failure."""
+    mr = d.get("model_revision") or {}
+    return mr.get("revision") or mr.get("commit") or mr.get("sha")
+
+
 def default_analysis_policy(**over) -> dict:
-    """FROZEN analysis thresholds (audit r7 blocker #8). Everything that can change which cells are
+    """FROZEN analysis policy (audit r7 #8, r8 #5). EVERY choice that can change which cells are
     included or called significant lives here, is written into the run manifest BEFORE the run, and is
     enforced in production -- so a report cannot be re-derived with friendlier settings."""
-    pol = {"alpha_range": list(ALPHA_RANGE),
-           "min_case_fraction": 0.8,
+    import config as C
+    pol = {"necessity_null": "shuf_fourier",           # r8 #5
+           "admissible_only": True,                    # r8 #5
+           "fdr_alpha": 0.05,                          # r8 #5
+           "alpha_range": list(ALPHA_RANGE),
+           "min_case_fraction": 1.0,                   # r8 #9: STRICT -- every case admissible
            "min_admitted_seeds": 5,
-           "cluster_by": 0,                      # 0 = source value
+           "cluster_by": 0,                            # 0 = source value
            "bootstrap_B": 20000,
-           "primary_requires_crossed_ci": True,  # blocker #3
+           "primary_requires_crossed_ci": True,        # r7 #3
+           "primary_necessity_position": C.PRIMARY_NECESSITY_POSITION,   # r8 #4
+           "secondary_necessity_positions": list(C.SECONDARY_NECESSITY_POSITIONS),
            "global_fdr_sensitivity": True,
-           "clean_accuracy_threshold": 0.8,      # blocker #9 (necessity eligibility)
-           "necessity_positions": ["last", "span", "after"],
-           "require_all_cases_processed": True}  # blocker #10
+           "clean_accuracy_threshold": 0.8,            # r7 #9 (necessity eligibility)
+           "baseline_policy": "in_run_leave_one_source_value_out",   # r8 #1: honest label
+           "require_all_cases_processed": True}        # r7 #10
     pol.update(over)
     return pol
 
@@ -195,8 +211,9 @@ def default_analysis_policy(**over) -> dict:
 def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_models: list,
                    expected_experiments: list, expected_forms: list, expected_cells: list = None,
                    primary_families: list = None, secondary_families: list = None,
-                   baseline_policy: str = "disjoint_calibration", required_fallback_count: int = 0,
-                   analysis_policy: dict = None, allow_dirty: bool = False) -> dict:
+                   baseline_policy: str = "in_run_leave_one_source_value_out", required_fallback_count: int = 0,
+                   analysis_policy: dict = None, allow_dirty: bool = False,
+                   necessity_ineligible_forms: dict = None) -> dict:
     """Declare up-front what this run MUST produce, so a partial run cannot be silently analyzed.
 
     `expected_cells` enumerates the EXACT cells (including intervention positions) the run must emit;
@@ -218,7 +235,8 @@ def write_manifest(run_dir: str, *, run_id: str, schema_version: str, expected_m
            "global_fdr_sensitivity": True,
            "baseline_policy": baseline_policy,
            "required_fallback_count": required_fallback_count,
-           "analysis_policy": analysis_policy or default_analysis_policy(),
+           "necessity_ineligible_forms": dict(necessity_ineligible_forms or {}),   # r8 #2
+           "analysis_policy": analysis_policy or default_analysis_policy(baseline_policy=baseline_policy),
            "allow_dirty": allow_dirty, "completion": {}}
     with open(os.path.join(run_dir, "manifest.json"), "w") as fh:
         json.dump(man, fh, indent=2)
@@ -265,8 +283,25 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
             problems.append(f"{name}: schema {d.get('schema_version')} != manifest {man.get('schema_version')}")
         if d.get("analysis_status") not in (None, VALIDATED):
             problems.append(f"{name}: {d.get('analysis_status')} result in a validated production report")
+        # model snapshot must be PINNED, not just present (audit r8 #7)
         if not d.get("model_revision"):
             problems.append(f"{name}: no model_revision recorded")
+        elif model_commit(d) is None:
+            problems.append(f"{name}: model_revision has no revision/commit hash (weights not pinned)")
+        # the manifest's baseline policy must match what the writer actually did (audit r8 #1)
+        wpol = d.get("baseline_policy") or d.get("baseline_fit_split")
+        if d.get("experiment_type") == "necessity" and wpol and man.get("baseline_policy") \
+                and wpol != man["baseline_policy"]:
+            problems.append(f"{name}: baseline_policy {wpol!r} != manifest {man['baseline_policy']!r}")
+        # exhaustive matched-delta coverage: delta keys must equal the expected case set (audit r8 #8)
+        for form, R in (d.get("results") or {}).items():
+            keys = R.get("per_case_keys", {})
+            exp = R.get("expected_case_keys")
+            dk = keys.get("delta")
+            if exp is not None and dk is not None and \
+                    {tuple(k) for k in dk} != {tuple(k) for k in exp}:
+                problems.append(f"{name}[{form}]: {len(exp) - len(dk)} case(s) missing from the "
+                                "matched-delta arrays (incomplete en_digit reference coverage)")
         # zero-fallback baseline policy (r6 blocker #6)
         for form, A in (d.get("ablation") or {}).items():
             if A.get("n_skipped_no_baseline"):
@@ -302,15 +337,36 @@ def validate_run_dir(run_dir: str, results: list, *, require_manifest: bool = Tr
     if dupes:
         problems.append(f"duplicate cells: {dupes}")
 
+    # every result must pin the SAME model snapshot for a given model (audit r8 #7)
+    by_model = {}
+    for name, d in results:
+        m = d.get("model") or (d.get("model_revision") or {}).get("name")
+        by_model.setdefault(m, set()).add(model_commit(d))
+    for m, revs in by_model.items():
+        real = {r for r in revs if r is not None}
+        if len(real) > 1:
+            problems.append(f"{m}: results used DIFFERENT model revisions {sorted(real)} "
+                            "(weights/tokenizer changed between jobs)")
+
     expected = man.get("expected_cells") or []
     if expected and strict_cells:
         observed = list(cells)
+        # ONE-TO-ONE assignment (audit r8 #6): every expected cell matches exactly one observed cell
+        # and vice versa. Matching only "some field is present" let two result files (e.g. two layers)
+        # both satisfy one under-specified expected cell.
         for spec in expected:
-            if not any(cell_matches(spec, c) for c in observed):
+            hits = [c for c in observed if cell_matches(spec, c)]
+            if len(hits) == 0:
                 problems.append(f"expected cell missing: {spec}")
+            elif len(hits) > 1:
+                problems.append(f"expected cell matched by {len(hits)} results (under-specified? "
+                                f"add layer): {spec} -> {hits}")
         for c in observed:
-            if not any(cell_matches(spec, c) for spec in expected):
+            hits = [spec for spec in expected if cell_matches(spec, c)]
+            if len(hits) == 0:
                 problems.append(f"unexpected result cell not in manifest: {c}")
+            elif len(hits) > 1:
+                problems.append(f"result cell matches {len(hits)} expected specs (ambiguous): {c}")
     elif not expected:
         seen_models = {c[1] for c in cells if c[1]}
         missing = [m for m in man.get("expected_models", []) if m not in seen_models]

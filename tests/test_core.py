@@ -409,7 +409,7 @@ def test_run_dir_validation_rejects_bad_runs(tmpdir=None):
         record_completion(d, "transport:M1", "ok"); record_completion(d, "transport:M2", "ok")
         def res(model, commit=None, **kw):
             return {"experiment_type": "transport", "model": model, "schema_version": "2.2",
-                    "analysis_status": "validated", "model_revision": {"name": model},
+                    "analysis_status": "validated", "model_revision": {"name": model, "revision": "r1"},
                     "code_commit": commit or cm, "dirty_worktree": False,
                     "results": {"en_digit": {"n_cases": 10}}, "all_cases_processed": True, **kw}
         ok = [("t_M1.json", res("M1")), ("t_M2.json", res("M2"))]
@@ -523,7 +523,7 @@ def test_manifest_enforces_exact_cells_and_zero_fallback():
 
         def mk(pos, **kw):
             body = {"experiment_type": "necessity", "model": "M", "schema_version": "2.3",
-                    "analysis_status": "validated", "model_revision": {"name": "M"},
+                    "analysis_status": "validated", "model_revision": {"name": "M", "revision": "r1"},
                     "code_commit": cm, "dirty_worktree": False, "ablation_position": pos,
                     "ablation": {"en_digit": {"n": 10}}, "all_cases_processed": True}
             body.update(kw)
@@ -598,6 +598,208 @@ def test_overnight_runner_is_manifest_driven():
 E_ABLATION_ID = "norm_matched_subspace_ablation"
 
 
+# ---- audit round 8: production-parity blockers ----
+def test_baseline_policy_consistency_enforced():
+    """Blocker #1: a manifest claiming one baseline policy and a result declaring another must fail."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.4", expected_models=["M"],
+                             expected_experiments=["necessity"], expected_forms=["en_digit"],
+                             baseline_policy="disjoint_calibration", allow_dirty=True,
+                             expected_cells=[{"experiment_type": "necessity", "model": "M",
+                                              "ablation_position": "after"}])
+        record_completion(d, "necessity:M:after", "ok")
+        cm = man["code_commit"]
+        res = ("n.json", {"experiment_type": "necessity", "model": "M", "schema_version": "2.4",
+                          "analysis_status": "validated", "model_revision": {"name": "M", "revision": "r1"},
+                          "code_commit": cm, "dirty_worktree": False, "ablation_position": "after",
+                          "baseline_policy": "in_run_leave_one_source_value_out",   # DISAGREES
+                          "ablation": {"en_digit": {"n": 10}}, "all_cases_processed": True})
+        try:
+            validate_run_dir(d, [res])
+            assert False, "mismatched baseline policy must fail"
+        except ValueError as e:
+            assert "baseline_policy" in str(e)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_separate_form_sets_and_en_word_notation():
+    """Blockers #2/#3: transport and necessity have separate form lists and transport isolates notation."""
+    import config as C
+    assert C.TRANSPORT_FORMS != C.NECESSITY_FORMS, "form sets must differ by experiment"
+    assert "en_word" in C.TRANSPORT_FORMS, "en_word needed to isolate the notation axis"
+    # necessity's set is the eligibility candidate set; ineligible foreign words are gated at run time
+    assert "es_word" in C.TRANSPORT_FORMS and "es_word" not in C.NECESSITY_FORMS
+
+
+def test_register_cells_gates_necessity_by_clean_acc():
+    """Blocker #2: register_cells marks low-accuracy necessity forms ineligible without failing, and
+    pins the layer into each cell (blocker #6)."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from src.provenance import write_manifest
+    d = tempfile.mkdtemp()
+    try:
+        write_manifest(d, run_id="t", schema_version=__import__("config").SCHEMA_VERSION,
+                       expected_models=["M"], expected_experiments=["transport", "necessity"],
+                       expected_forms=["en_digit", "es_word"], allow_dirty=True)
+        json.dump({"models": {"M": {"selected_layer": 14, "model_revision": {"revision": "r1"}}}},
+                  open(os.path.join(d, "layers.json"), "w"))
+        json.dump({"M": {"en_digit": 0.95, "es_word": 0.10}}, open(os.path.join(d, "elig.json"), "w"))
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([sys.executable, os.path.join(root, "scripts/register_cells.py"),
+                            "--run-dir", d, "--layers", os.path.join(d, "layers.json"),
+                            "--eligibility", os.path.join(d, "elig.json"),
+                            "--transport-forms", "en_digit", "es_word",
+                            "--necessity-forms", "en_digit", "es_word"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        man = json.load(open(os.path.join(d, "manifest.json")))
+        assert "M:es_word" in man["necessity_ineligible_forms"], "low-acc form must be ineligible"
+        # every expected cell pins a layer (blocker #6)
+        assert all("layer" in c and c["layer"] == 14 for c in man["expected_cells"])
+        nec_cells = [c for c in man["expected_cells"] if c["experiment_type"] == "necessity"]
+        assert nec_cells and all(c["ablation_position"] in ("after", "last", "span") for c in nec_cells)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_primary_necessity_position_is_single_family():
+    """Blocker #4: only the primary position is FDR-corrected as primary; others are secondary."""
+    import config as C
+    assert C.PRIMARY_NECESSITY_POSITION not in C.SECONDARY_NECESSITY_POSITIONS
+    s = _src("scripts/analyze_stats.py")
+    assert "primary_necessity_position" in s
+    assert 'r.get("ablation_position") == args.primary_necessity_position' in s
+    assert '"secondary"' in s, "non-primary positions must be a distinct secondary family"
+
+
+def test_analysis_policy_freezes_all_choices():
+    """Blocker #5: null, admissible-only and FDR alpha are frozen too."""
+    from src.provenance import default_analysis_policy
+    pol = default_analysis_policy()
+    for k in ("necessity_null", "admissible_only", "fdr_alpha", "primary_necessity_position",
+              "min_case_fraction"):
+        assert k in pol, f"policy must freeze {k}"
+    assert pol["min_case_fraction"] == 1.0, "strict admission is the frozen default (blocker #9)"
+    s = _src("scripts/analyze_stats.py")
+    assert '("necessity_null", "null")' in s and '("fdr_alpha", "alpha")' in s
+
+
+def test_expected_cell_matching_is_one_to_one():
+    """Blocker #6: two results for one model at different layers must not both satisfy one cell."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.4", expected_models=["M"],
+                             expected_experiments=["transport"], expected_forms=["en_digit"],
+                             allow_dirty=True,
+                             expected_cells=[{"experiment_type": "transport", "model": "M",
+                                              "estimand": E_DELTA, "layer": 14}])
+        record_completion(d, "transport:M", "ok")
+        cm = man["code_commit"]
+        def tr(layer):
+            return (f"t_L{layer}.json", {"experiment_type": "transport", "model": "M", "estimand": E_DELTA,
+                    "layer": layer, "schema_version": "2.4", "analysis_status": "validated",
+                    "model_revision": {"name": "M", "revision": "r1"}, "code_commit": cm,
+                    "dirty_worktree": False, "results": {"en_digit": {"n_cases": 5}},
+                    "all_cases_processed": True})
+        validate_run_dir(d, [tr(14)])                                # exact layer match passes
+        try:
+            validate_run_dir(d, [tr(14), tr(15)])                    # L15 is an unexpected cell
+            assert False, "two layers for one expected cell must fail"
+        except ValueError:
+            pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_model_revision_must_be_pinned_and_consistent():
+    """Blocker #7: null revision, or differing revisions across jobs, must fail."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion, model_commit
+    assert model_commit({"model_revision": {"revision": "abc"}}) == "abc"
+    assert model_commit({"model_revision": {"name": "M"}}) is None
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.4", expected_models=["M"],
+                             expected_experiments=["transport", "necessity"], expected_forms=["en_digit"],
+                             allow_dirty=True,
+                             expected_cells=[{"experiment_type": "transport", "model": "M", "layer": 14},
+                                             {"experiment_type": "necessity", "model": "M", "layer": 14,
+                                              "ablation_position": "after"}])
+        record_completion(d, "transport:M", "ok"); record_completion(d, "necessity:M:after", "ok")
+        cm = man["code_commit"]
+        def f(kind, rev, **kw):
+            b = {"experiment_type": kind, "model": "M", "layer": 14, "schema_version": "2.4",
+                 "analysis_status": "validated", "model_revision": {"name": "M", "revision": rev},
+                 "code_commit": cm, "dirty_worktree": False, "all_cases_processed": True}
+            b.update(kw); return (f"{kind}.json", b)
+        good = [f("transport", "r1", results={"en_digit": {"n_cases": 5}}),
+                f("necessity", "r1", ablation_position="after", ablation={"en_digit": {"n": 5}},
+                  baseline_policy=man["baseline_policy"])]
+        validate_run_dir(d, good)
+        bad = [good[0], f("necessity", "r2", ablation_position="after", ablation={"en_digit": {"n": 5}},
+                          baseline_policy=man["baseline_policy"])]          # different revision
+        try:
+            validate_run_dir(d, bad)
+            assert False, "mismatched model revisions must fail"
+        except ValueError as e:
+            assert "revision" in str(e).lower()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_delta_coverage_checked_in_validation():
+    """Blocker #8: a transport file whose delta keys omit expected cases must fail production."""
+    import shutil
+    import tempfile
+    from src.provenance import validate_run_dir, write_manifest, record_completion
+    d = tempfile.mkdtemp()
+    try:
+        man = write_manifest(d, run_id="t", schema_version="2.4", expected_models=["M"],
+                             expected_experiments=["transport"], expected_forms=["en_digit"],
+                             allow_dirty=True,
+                             expected_cells=[{"experiment_type": "transport", "model": "M", "layer": 14}])
+        record_completion(d, "transport:M", "ok")
+        cm = man["code_commit"]
+        keys = [[0, 1, 1], [1, 0, 1]]
+        base = {"experiment_type": "transport", "model": "M", "layer": 14, "schema_version": "2.4",
+                "analysis_status": "validated", "model_revision": {"name": "M", "revision": "r1"},
+                "code_commit": cm, "dirty_worktree": False, "all_cases_processed": True}
+        full = {**base, "results": {"en_digit": {"n_cases": 2,
+                "per_case_keys": {"delta": keys}, "expected_case_keys": keys}}}
+        validate_run_dir(d, [("t.json", full)])
+        short = {**base, "results": {"en_digit": {"n_cases": 2,
+                 "per_case_keys": {"delta": keys[:1]}, "expected_case_keys": keys}}}
+        try:
+            validate_run_dir(d, [("t.json", short)])
+            assert False, "incomplete delta coverage must fail"
+        except ValueError as e:
+            assert "matched-delta" in str(e)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_strict_seed_admission_rejects_partial_seed():
+    """Blocker #9: with min_case_fraction=1.0 a seed with any out-of-range case is rejected."""
+    from analyze_stats import admit_global_seeds
+    A = np.array([[True, True], [True, False], [True, True]])   # seed 0 all-ok, seed 1 has one bad case
+    keep_strict, _ = admit_global_seeds(A, min_case_frac=1.0)
+    assert keep_strict == [0], "strict admission keeps only the fully-admissible seed"
+    keep_loose, _ = admit_global_seeds(A, min_case_frac=0.5)
+    assert keep_loose == [0, 1], "the 0.5 rule is only a sensitivity view"
+
+
 # ---- audit round 7: go/no-go blockers ----
 def _src(rel):
     import pathlib
@@ -610,10 +812,11 @@ def test_runner_passes_production_to_writers():
     assert "PROD_FLAGS=(--production)" in s, "production must be the default writer mode"
     for line in ("run_transport.py", "run_necessity.py"):
         idx = s.index(line)
-        assert '"${PROD_FLAGS[@]}"' in s[idx:idx + 400], f"{line} must receive the production flags"
+        assert 'PROD_FLAGS[@]+' in s[idx:idx + 400], f"{line} must receive the production flags"
     # scratch mode (dirty tree) must disable it, else every scratch job fails for the wrong reason
     assert "PROD_FLAGS=()" in s and "MODE=scratch" in s
-    assert "export POSITIONS" in s, "POSITIONS must be exported for the manifest builder"
+    # eligibility + exact-cell registration replaces the old inline manifest builder
+    assert "scripts/measure_clean.py" in s and "scripts/register_cells.py" in s
 
 
 def test_runner_handles_empty_arrays_under_set_u():
@@ -622,10 +825,9 @@ def test_runner_handles_empty_arrays_under_set_u():
     configurations -- PAIRS_FLAG is empty in the PRODUCTION default (PAIRS=0)."""
     import subprocess
     s = _src("scripts/run_overnight.sh")
-    for name in ("PROD_FLAGS", "NEWRUN_FLAGS", "PAIRS_FLAG"):
+    for name in ("PROD_FLAGS", "NEWRUN_FLAGS", "DIRTY_FLAGS"):   # arrays that can be empty
         guarded = f'"${{{name}[@]+"${{{name}[@]}}"}}"'
         assert guarded in s, f"{name} must use the \"${{arr[@]+...}}\" idiom"
-        # strip the guarded occurrences, then no BARE expansion may remain
         assert f'"${{{name}[@]}}"' not in s.replace(guarded, ""), \
             f"{name} still has a bare empty-array expansion somewhere"
     # the unsafe form really does fail, so the guard is not cosmetic
@@ -700,7 +902,7 @@ def test_validator_rejects_empty_payload_and_zero_cases():
         record_completion(d, "transport:M", "ok")
         cm = man["code_commit"]
         base = {"experiment_type": "transport", "model": "M", "schema_version": "2.3",
-                "analysis_status": "validated", "model_revision": {"name": "M"},
+                "analysis_status": "validated", "model_revision": {"name": "M", "revision": "r1"},
                 "code_commit": cm, "dirty_worktree": False, "all_cases_processed": True}
         validate_run_dir(d, [("t.json", {**base, "results": {"en_digit": {"n_cases": 8}}})])
         for payload, why in (({}, "empty results"),

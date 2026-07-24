@@ -124,7 +124,8 @@ def main():
                                       schema_version=C.SCHEMA_VERSION, production=args.production)
     args.layer = layer
     print(f"\nModel: {args.model} | layer(hidden_states): {args.layer} [{layer_prov['layer_source']}]")
-    model, tok, device = load_model(args.model, args.device)
+    model, tok, device = load_model(args.model, args.device,
+                                    revision=layer_prov.get('frozen_model_revision'))
     d_model = model.config.hidden_size
     if args.layer < 1:
         raise SystemExit("--layer must be >= 1 (need a decoder block to hook)")
@@ -212,16 +213,26 @@ def main():
     all_modes = legacy_modes + delta_modes
     en_arith = {}
     if args.delta:
-        for (v, b) in {(a, b) for (a, ap, b) in cases} | {(ap, b) for (a, ap, b) in cases}:
+        required_en = {(a, b) for (a, ap, b) in cases} | {(ap, b) for (a, ap, b) in cases}
+        for (v, b) in required_en:
             vs = str(v)
             eprompt = f"{vs} + {b} = "
             try:
                 epos = _number_token_indices(tok, eprompt, vs)[-1]
             except ValueError:
+                # BLOCKER 8: a missing en_digit reference silently drops the cases that need it from the
+                # matched-delta arrays, so `all_cases_processed` could still be true while the primary
+                # arrays are short. In production that must abort, not continue.
+                if args.production:
+                    raise SystemExit(f"en_digit reference activation unavailable for ({v} + {b}); "
+                                     "production requires complete matched-delta coverage")
                 continue
             _, eh, _ = logits_last(model, tok, device, eprompt, want_hidden=True, layer=args.layer)
             en_arith[(v, b)] = eh[epos]
-        print(f"delta transport: cached {len(en_arith)} en_digit arithmetic activations")
+        if args.production and set(en_arith) != required_en:
+            raise SystemExit(f"incomplete en_digit reference coverage: "
+                             f"{len(required_en - set(en_arith))} of {len(required_en)} missing")
+        print(f"delta transport: cached {len(en_arith)}/{len(required_en)} en_digit arithmetic activations")
 
     results = {}
     for form in args.forms:
@@ -383,7 +394,7 @@ def main():
            "delta_control_families": DELTA_FAMILIES,
            "control_bank_selection": bank_reports,
            "energy_matched_controls": args.energy_matched_controls,
-           "model_revision": model_revision(model, args.model),
+           "model_revision": model_revision(model, args.model, revision=getattr(model, "_pinned_revision", None)),
            "model": args.model, "layer": args.layer, "r": r, "max_sum": args.max_sum,
            "addends": args.addends, "fit_r2": fit["r2"], "hook_rel_error": hook_err,
            "delta_ctrl_seeds": args.delta_ctrl_seeds,

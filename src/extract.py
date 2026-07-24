@@ -6,12 +6,26 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 
-def model_revision(model, name: str) -> dict:
-    """Reproducibility stamp: model id + resolved commit hash (if available) + dtype."""
+def resolve_hf_revision(name: str) -> str | None:
+    """Resolve the mutable model id to an immutable commit sha on the Hub (audit r8 #7), so every
+    causal job can be pinned to the SAME snapshot even across days / a mutable `main`. Returns None
+    for a local path or when offline."""
+    try:
+        from huggingface_hub import HfApi
+        return HfApi().model_info(name).sha
+    except Exception:
+        return None
+
+
+def model_revision(model, name: str, revision: str | None = None) -> dict:
+    """Reproducibility stamp: model id + the PINNED Hub commit sha + resolved config hash + dtype.
+    `revision` is the sha the weights were actually loaded at (from load_model)."""
     cfg = getattr(model, "config", None)
+    tok_cls = None
     return {
         "name": name,
-        "commit_hash": getattr(cfg, "_commit_hash", None),
+        "revision": revision,                                   # the sha we pinned to (may be None locally)
+        "commit_hash": getattr(cfg, "_commit_hash", None) or getattr(cfg, "commit_hash", None),
         "dtype": str(getattr(model, "dtype", None)),
     }
 
@@ -31,16 +45,20 @@ def pick_dtype(device: str):
     return torch.bfloat16 if device == "cuda" else torch.float32
 
 
-def load_model(name: str, device: str | None = "auto"):
+def load_model(name: str, device: str | None = "auto", revision: str | None = None):
+    """Load model + fast tokenizer. `revision` pins BOTH to one immutable Hub snapshot (audit r8 #7);
+    also returns the sha that was actually used so the caller can stamp it."""
     device = pick_device(device)
     dtype = pick_dtype(device)
-    tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+    rev = revision or resolve_hf_revision(name)      # freeze to a sha up front when possible
+    rkw = {"revision": rev} if rev else {}
+    tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True, **rkw)
     if not tok.is_fast:
         raise RuntimeError(
             f"Tokenizer for {name} is not a fast tokenizer; offset mapping is required. "
             "Pick a model with a fast tokenizer."
         )
-    kw = dict(torch_dtype=dtype, output_hidden_states=True, trust_remote_code=True)
+    kw = dict(torch_dtype=dtype, output_hidden_states=True, trust_remote_code=True, **rkw)
     try:
         model = AutoModelForCausalLM.from_pretrained(name, **kw)
     except (ValueError, KeyError):
@@ -59,6 +77,7 @@ def load_model(name: str, device: str | None = "auto"):
             if getattr(cfg, attr, None) is None and getattr(tcfg, attr, None) is not None:
                 setattr(cfg, attr, getattr(tcfg, attr))
     model.to(device).eval()
+    model._pinned_revision = rev                      # so model_revision() can stamp the sha used
     return model, tok, device
 
 

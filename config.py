@@ -12,12 +12,30 @@
 #   2.3 = post round-5/6 (independent layer selection wired in + frozen layer manifest, GLOBAL control
 #         -seed admissibility driving the primary estimate, exact-cell manifests, hardened interchange,
 #         zero-fallback production baselines, manifest-driven production runner, exhaustive case sets)
-SCHEMA_VERSION = "2.3"
+#   2.4 = post round-8 (honest baseline-policy label, separate transport/necessity form sets with a
+#         preregistered clean-behaviour eligibility phase, en_word notation contrast, ONE primary
+#         necessity position + joint-FDR fallback, full analysis-policy freeze, layer in the cell id +
+#         1:1 matching, pinned model revisions, exhaustive delta-coverage check, strict alpha admission)
+SCHEMA_VERSION = "2.4"
 
 # PREREGISTERED multiple-testing families (audit r6 #11): declared here, in code, BEFORE any run --
 # never chosen after inspecting results. The production manifest records these verbatim.
 PRIMARY_FAMILIES = ["delta_vs_shuf_fourier", "necessity"]
 SECONDARY_FAMILIES = ["delta_vs_pca_span", "delta_transport", "interchange"]
+
+# ONE primary necessity position (audit r8 #4). Testing last/span/after as three separate FDR families
+# inflates the chance one looks significant; `after` is the cleanest single-position test of an
+# aggregated multi-token representation. The other two are secondary sensitivity analyses.
+PRIMARY_NECESSITY_POSITION = "after"
+SECONDARY_NECESSITY_POSITIONS = ["last", "span"]
+
+# The causal readout needs the model to actually DO the arithmetic in a form, so transport (logit
+# steering, meaningful even at imperfect accuracy) and necessity (undefined when behaviour is absent)
+# get DIFFERENT default form sets (audit r8 #2/#3). en_word is included so the NOTATION axis
+# (en_digit<->en_word) is isolated, not confounded with language.
+TRANSPORT_FORMS = ["en_digit", "en_word", "devanagari_digit", "arabic_indic_digit", "fullwidth_digit",
+                   "es_word", "fr_word", "de_word"]
+NECESSITY_FORMS = ["en_digit", "en_word", "devanagari_digit", "arabic_indic_digit", "fullwidth_digit"]
 
 # Base models are cleaner for number geometry than chat-tuned ones. The causal legs need BASE
 # models (instruct models score ~0 clean_acc on "a + b = "); the representational legs (H2 +

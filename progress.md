@@ -814,10 +814,37 @@ addressed. **Numerical/reproducibility (require regenerating magnitudes):**
 - Legacy absolute modes now warn that they **extrapolate** the helix (fit 10–99, reconstruct 0–9).
 - `run_fit_and_align`'s confounded per-form-vs-`en_digit` summary is renamed
   `axis_summary_confounded_vs_en_digit` with `authoritative_h2_source` pointing at `run_structure`.
+**Round 8 (production-parity audit) — all 9 blockers closed; schema 2.4:**
+- ✅ **B1 Honest baseline label.** The manifest policy is `in_run_leave_one_source_value_out` (not
+  `disjoint_calibration`); the writer stamps `baseline_policy` and the validator **rejects a mismatch**.
+- ✅ **B2 Separate form sets + eligibility phase.** `measure_clean.py` measures clean accuracy per
+  (model, form) **before** any intervention; `register_cells.py` marks necessity forms below the
+  frozen threshold `not_testable`, keeps them out of the expected-cell set and denominator, and
+  records why. Transport keeps all forms; a preregistered-ineligible form no longer fails the run.
+- ✅ **B3 Notation axis isolated.** `TRANSPORT_FORMS` includes `en_word`, so `en_digit↔en_word` is tested.
+- ✅ **B4 One primary necessity position.** `after` is primary and enters FDR; `last`/`span` are a
+  separate secondary sensitivity family (jointly BH-corrected, never headline).
+- ✅ **B5 Full analysis-policy freeze.** `necessity_null`, `admissible_only`, `fdr_alpha`, and
+  `primary_necessity_position` are frozen in the manifest and conflicting CLI values are rejected.
+- ✅ **B6 Layer in the cell id + 1:1 matching.** Expected cells pin the layer; the validator requires
+  each expected cell to match exactly one result and vice versa (two layers for one model → fail).
+- ✅ **B7 Model revisions pinned.** `load_model(revision=…)` pins weights+tokenizer to one HF sha;
+  `select_layers` resolves and stores it; causal jobs load at that sha; the validator requires a
+  non-null revision and **identical revision across all of a model's jobs**.
+- ✅ **B8 Exhaustive delta coverage enforced.** Missing en_digit reference activations abort production;
+  the validator checks `delta keys == expected case keys`.
+- ✅ **B9 Strict seed admission.** `min_case_fraction` defaults to **1.0** (every case admissible); the
+  0.8 rule is a sensitivity view only.
+- ✅ **Geometry:** confounded per-form-vs-`en_digit` summary renamed `axis_summary_confounded_vs_en_digit`
+  with `authoritative_h2_source` → `run_structure`; geometry scripts already fit on a **randomized
+  full-range** evaluation split (only `select_layers` uses a contiguous split, acceptable for causal
+  layer discovery); final hidden layer excluded from selection (post-norm hook mismatch).
+- **Non-blocking:** `pip freeze` saved with every run; environment recorded.
+- **Tests 55 → 64.**
 - ☐ **Open (need new data / decisions):** carrier-language factorial; joint-span necessity;
   continuation-likelihood / word-form readouts; coordinate-level bootstrap CIs + no-rotation
   cross-prediction; downstream-**sensitivity**-matched controls; cluster sensitivity reporting beyond
-  source value (flag exists, needs to be run and tabulated).
+  source value; a truly disjoint calibration set for the ablation baseline (currently cross-fit).
 - ☐ **Final concurrent-work search before submission.** Related work verified 2026-07-18 (Gupta
   blog; Lan/Torr/Barez 2311.04131; FARS 2605.09496; Semantic Hub 2411.04986) — the novelty is scoped
   accordingly. Re-search close to submission for concurrent cross-form / same-coordinate number work,

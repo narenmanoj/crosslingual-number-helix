@@ -132,7 +132,8 @@ def main():
     hook_layer = args.layer - 1
 
     print(f"\nModel: {args.model} | layer {args.layer} | intervention-pos {args.intervention_pos}")
-    model, tok, device = load_model(args.model, args.device)
+    model, tok, device = load_model(args.model, args.device,
+                                    revision=layer_prov.get('frozen_model_revision'))
     d_model = model.config.hidden_size
     hook_err = assert_hook_equivalence(model, tok, device, hook_layer)  # audit #4: fail-fast, saved to JSON
     print(f"hook-equivalence rel-error @ block {hook_layer}: {hook_err:.2e}")
@@ -412,7 +413,8 @@ def main():
 
     out = {**stamp(C.SCHEMA_VERSION, "necessity", estimand=E_ABLATION,
                    analysis_status=VALIDATED, allow_dirty=args.allow_dirty),
-           "model_revision": model_revision(model, args.model), "layer": args.layer,
+           "model_revision": model_revision(model, args.model, revision=getattr(model, "_pinned_revision", None)),
+           "layer": args.layer,
            # positions are recorded SEPARATELY: the ablation honors --intervention-pos, the delta
            # interchange always injects at the source's last token (audit r4 #9)
            "layer_selection": layer_prov,
@@ -420,6 +422,7 @@ def main():
            "interchange_estimand": "matched_arithmetic_delta",
            "r": r, "n_seeds": args.n_seeds, "ablation_baseline": args.ablation_baseline,
            "baseline_fit_split": "in_run", "baseline_crossfit_group": args.baseline_crossfit,
+           "baseline_policy": "in_run_leave_one_source_value_out" if args.baseline_crossfit == "source_value" else "in_run_pooled",
            "on_baseline_fallback": args.on_baseline_fallback,
            "fit_values": [args.fit_min, args.fit_max], "causal_values": [0, args.max_sum],
            "value_sets_disjoint": set(range(args.fit_min, args.fit_max + 1)).isdisjoint(range(0, args.max_sum + 1)),
